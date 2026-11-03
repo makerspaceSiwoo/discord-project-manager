@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "discord-project-manager",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*", "/auth/*", "/interactions", "/webhooks/*"],
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "yeonsuri",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "APP_ORIGIN": "http://localhost:8787",
+    "PROJECT_ID": "default",
+    "NOTION_VERSION": "2026-03-11",
+  },
+  "observability": { "enabled": false },
+}
