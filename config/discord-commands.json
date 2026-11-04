@@ -24,13 +24,13 @@
   },
   {
     "name": "주간",
-    "description": "이번 주 미완료 작업 보고 발송 또는 기존 보고 확인",
+    "description": "Notion 최신 내용으로 이번 주 미완료 작업 보고 새로 발송",
     "type": 1,
     "options": [
       {
         "type": 1,
         "name": "보고",
-        "description": "이번 주 미완료 작업 보고 발송 또는 기존 보고 확인"
+        "description": "Notion 최신 내용으로 이번 주 미완료 작업 보고 새로 발송"
       }
     ]
   },
