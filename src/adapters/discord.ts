@@ -48,22 +48,39 @@ export class Discord {
       allowed_mentions: { parse: [] },
     });
   }
-  async findMessage(channel: string, marker: string) {
+  async findMessage(channel: string, marker: string, nonce?: string) {
     const rows: any[] = await this.api(`/channels/${channel}/messages?limit=100`);
     const matches = rows.filter(
-      (m) => m.author?.id === this.env.DISCORD_APPLICATION_ID && m.content?.includes(marker),
+      (m) =>
+        m.author?.id === this.env.DISCORD_APPLICATION_ID &&
+        (m.content?.includes(marker) || (nonce && m.nonce === nonce)),
     );
     if (matches.length > 1) throw new AppError(409, '중복 메시지 발견: 관리자 복구가 필요합니다.');
     return matches[0] || null;
   }
-  async findForum(p: Project, marker: string) {
+  async findForum(p: Project, marker: string, taskId?: string, notionUrl?: string) {
     const active = await this.api(`/guilds/${p.guildId}/threads/active`);
     const archived = await this.api(
       `/channels/${p.issueChannelId}/threads/archived/public?limit=100`,
     );
-    const matches = [...active.threads, ...archived.threads].filter(
-      (t) => t.parent_id === p.issueChannelId && t.name.includes(marker),
-    );
+    const candidates = [
+      ...new Map([...active.threads, ...archived.threads].map((t: any) => [t.id, t])).values(),
+    ] as any[];
+    const matches = [];
+    for (const t of candidates) {
+      if (t.parent_id !== p.issueChannelId) continue;
+      if (t.name.includes(marker)) {
+        matches.push(t);
+        continue;
+      }
+      if (!taskId || !notionUrl || !t.name.startsWith(safeText(taskId) + ' · ')) continue;
+      const starter = await this.api(`/channels/${t.id}/messages/${t.id}`);
+      if (
+        starter.author?.id === this.env.DISCORD_APPLICATION_ID &&
+        starter.content?.includes(`<${notionUrl}>`)
+      )
+        matches.push(t);
+    }
     if (matches.length > 1) throw new AppError(409, '중복 포럼 게시물: 관리자 확인 필요');
     if (!matches.length) return null;
     return { ...matches[0], message: { id: matches[0].id } };
