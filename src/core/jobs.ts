@@ -28,7 +28,8 @@ export async function schedule(env: Env, p: Project, at = Date.now()) {
   const due: [string, string, number][] = [
     ['poll-open', 'open', t.opens],
     ['poll-remind', 'remind', t.reminder],
-    ['poll-close', 'close', t.closes],
+    // Voting closes by its stored deadline; publish the result link on Monday morning.
+    ['poll-close', 'close', t.report],
     ['report', 'report', t.report],
   ];
   const statements = due
@@ -446,6 +447,13 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
     return null;
   }
   if (job.kind === 'poll-close') {
+    // Also defer jobs queued by older deployments until the result publication time.
+    if (Date.now() < t!.report)
+      throw new RemoteError(
+        'poll-result-not-ready',
+        429,
+        Math.ceil((t!.report - Date.now()) / 1000),
+      );
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', pollId);
     if (!poll?.thread_id)
       throw new AppError(409, '원래 투표 스레드가 없습니다. 개시 작업을 복구하세요.');

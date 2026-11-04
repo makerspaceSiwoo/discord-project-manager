@@ -1188,3 +1188,45 @@ describe('계정 연결과 로그인 유지', () => {
     expect((await one(e.DB, 'SELECT expires FROM sessions')).expires).toBe(1);
   });
 });
+
+describe('월요일 투표 결과 링크', () => {
+  it('결과 안내는 마감 직후가 아닌 월요일 09시에 한 번 예약한다', async () => {
+    const week = '2026-11-09';
+    await schedule(e, p, Date.parse(week + 'T08:59:59+09:00'));
+    expect(await one(e.DB, "SELECT 1 FROM jobs WHERE kind='poll-close'")).toBeNull();
+    await schedule(e, p, Date.parse(week + 'T09:00:00+09:00'));
+    await schedule(e, p, Date.parse(week + 'T09:00:01+09:00'));
+    const jobs = await all(e.DB, "SELECT next_at FROM jobs WHERE kind='poll-close'");
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].next_at).toBe(Date.parse(week + 'T09:00:00+09:00'));
+  });
+  it('원래 투표 스레드에 팀 결과 링크만 게시하고 이미지는 첨부하지 않는다', async () => {
+    const week = '2026-01-05',
+      pollId = p.id + ':' + week;
+    await run(
+      e.DB,
+      'INSERT INTO polls(id,project_id,week,opens,closes,members,thread_id) VALUES(?,?,?,?,?,?,?)',
+      pollId,
+      p.id,
+      week,
+      0,
+      1,
+      '[]',
+      'original-thread',
+    );
+    let message: any;
+    fake((url, init) => {
+      if (url.pathname === '/api/v10/channels/original-thread')
+        return { thread_metadata: { archived: false } };
+      if (url.pathname === '/api/v10/channels/original-thread/messages' && init.method === 'POST') {
+        message = JSON.parse(init.body);
+        return { id: 'result-message' };
+      }
+      throw new Error('Unexpected request');
+    });
+    await enqueue(e.DB, 'result-job', 'poll-close', { week });
+    expect((await jobStep('result-job')).status).toBe('done');
+    expect(message.content).toContain('/?poll=' + encodeURIComponent(pollId) + '&tab=team');
+    expect(message.attachments).toBeUndefined();
+  });
+});
