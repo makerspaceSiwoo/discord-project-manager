@@ -1593,3 +1593,14 @@ it('관리자 테스트만 정기 자동화 비활성 상태에서 투표와 보
   }
   expect(await one(e.DB, "SELECT 1 FROM jobs WHERE kind IN ('dm','poll-remind')")).toBeNull();
 });
+
+it('중복 테스트 실행 요청은 1분간 같은 실행을 반환한다', async () => {
+  const requests = await Promise.all([
+    startManualTest(e, p, { ...who, admin: true }, 5),
+    startManualTest(e, p, { ...who, admin: true }, 5),
+  ]);
+  expect(requests[0]).toEqual(requests[1]);
+  expect(
+    (await all(e.DB, "SELECT * FROM jobs WHERE kind IN ('test-poll-open','test-report')")).length,
+  ).toBe(2);
+});

@@ -1,5 +1,6 @@
 import { AppError, type Env, type Project, type Identity } from '../core/types';
 import { currentWeek } from './scheduling';
+import { one } from '../core/db';
 import { random } from '../core/crypto';
 
 export async function startManualTest(env: Env, p: Project, who: Identity, minutes = 5) {
@@ -17,26 +18,25 @@ export async function startManualTest(env: Env, p: Project, who: Identity, minut
     userId: who.userId,
   });
   const pollId = `test:${p.id}:${id}`;
+  const lockId = `manual-test:${p.id}`;
   await env.DB.batch([
-    env.DB.prepare('INSERT INTO jobs(id,kind,payload,next_at,created_at) VALUES(?,?,?,?,?)').bind(
-      `${pollId}:open`,
-      'test-poll-open',
-      payload,
-      at,
-      at,
-    ),
-    env.DB.prepare('INSERT INTO jobs(id,kind,payload,next_at,created_at) VALUES(?,?,?,?,?)').bind(
-      `${pollId}:report`,
-      'test-report',
-      payload,
-      at + 1,
-      at,
-    ),
+    env.DB.prepare(
+      `INSERT INTO locks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires=excluded.expires WHERE locks.expires<=?`,
+    ).bind(lockId, id, at + 60_000, at),
+    env.DB.prepare(
+      `INSERT INTO jobs(id,kind,payload,next_at,created_at) SELECT ?,'test-poll-open',?,?,? FROM locks WHERE id=? AND owner=?`,
+    ).bind(`${pollId}:open`, payload, at, at, lockId, id),
+    env.DB.prepare(
+      `INSERT INTO jobs(id,kind,payload,next_at,created_at) SELECT ?,'test-report',?,?,? FROM locks WHERE id=? AND owner=?`,
+    ).bind(`${pollId}:report`, payload, at + 1, at, lockId, id),
   ]);
+  const current = await one(env.DB, 'SELECT owner FROM locks WHERE id=?', lockId);
+  const activePollId = `test:${p.id}:${current.owner}`;
+  const active = await one(env.DB, 'SELECT payload FROM jobs WHERE id=?', `${activePollId}:open`);
   return {
-    pollId,
-    openJob: `${pollId}:open`,
-    reportJob: `${pollId}:report`,
-    durationMinutes: minutes,
+    pollId: activePollId,
+    openJob: `${activePollId}:open`,
+    reportJob: `${activePollId}:report`,
+    durationMinutes: JSON.parse(active.payload).durationMinutes,
   };
 }
