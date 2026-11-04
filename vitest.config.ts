@@ -5,6 +5,12 @@ export default defineConfig({
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
+        // Keep native Worker fetch in the runtime test while avoiding real network traffic.
+        outboundService: (request) => {
+          const url = new URL(request.url);
+          if (url.hostname !== 'http-fixture.test') return new Response(null, { status: 502 });
+          return Response.json({ ok: true, method: request.method });
+        },
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations('./migrations'),
           DISCORD_APPLICATION_ID: '99999',
