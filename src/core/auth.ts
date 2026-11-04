@@ -186,11 +186,12 @@ export async function logout(env: Env, identity: Identity) {
     headers: { 'Set-Cookie': cookie(env, 'session', '', 0) },
   });
 }
-export async function linkedMembers(env: Env, p: Project) {
+export async function linkedMembers(env: Env, p: Project, viewerId = '') {
   return all(
     env.DB,
-    'SELECT l.discord_id,l.notion_id,COALESCE(MAX(s.name),l.discord_id) AS name FROM links l LEFT JOIN sessions s ON s.user_id=l.discord_id WHERE l.project_id=? AND (l.valid_until=0 OR l.valid_until>?) GROUP BY l.discord_id,l.notion_id',
+    'SELECT l.discord_id,l.notion_id,COALESCE(MAX(s.name),l.discord_id) AS name FROM links l LEFT JOIN sessions s ON s.user_id=l.discord_id WHERE l.project_id=? AND (l.valid_until=0 OR l.valid_until>?) GROUP BY l.discord_id,l.notion_id ORDER BY CASE WHEN l.discord_id=? THEN 0 ELSE 1 END,name COLLATE NOCASE,l.discord_id',
     p.id,
     Date.now(),
+    viewerId,
   );
 }

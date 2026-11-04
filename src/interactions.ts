@@ -58,17 +58,17 @@ export async function interactions(req: Request, env: Env, p: Project, ctx: Exec
         i.data?.options?.some((option: any) => option.type === 1 && option.name === '생성'))
     ) {
       // The modal needs only a bounded local D1 query before the initial response.
-      const members = await linkedMembers(env, p);
+      const members = await linkedMembers(env, p, userId);
       if (!members.length)
         return ephemeral('먼저 /계정연결로 담당자의 Notion 계정을 연결해 주세요.');
       if (members.length > 25) return ephemeral('현재 폼은 최대 25명의 담당자를 지원합니다.');
-      return json(modal(p, members));
+      return json(modal(p, members, userId));
     }
     if (custom === 'issue:open') {
-      const members = await linkedMembers(env, p);
+      const members = await linkedMembers(env, p, userId);
       if (!members.length) return ephemeral('연결된 담당자가 없습니다. /계정연결을 이용하세요.');
       if (members.length > 25) return ephemeral('현재 폼은 최대 25명의 담당자를 지원합니다.');
-      return json(modal(p, members));
+      return json(modal(p, members, userId));
     }
     if (custom === 'issue:required' && i.type === 5) {
       const draft = validateDraft(fields(i.data.components), p),

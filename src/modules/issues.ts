@@ -62,7 +62,7 @@ export function issueSummary(i: Issue, discordUsers: string[]) {
       : '미지정';
   return `**[${safeText(i.taskId)}] ${safeText(i.title).slice(0, 150)}**\n\n상태 : **${issueStatus(i)}**\n유형 : ${safeText(i.type)}\n마감일 : ${i.due || '없음'}\n우선순위 : ${safeText(i.priority)}\n담당자 : ${assignees}\n\n<${i.url}>`;
 }
-export function modal(p: Project, members: { discord_id: string; name?: string }[]) {
+export function modal(p: Project, members: { discord_id: string; name?: string }[], viewerId = '') {
   const label = (name: string, component: any) => ({ type: 18, label: name, component });
   const text = (custom_id: string, max_length: number, placeholder: string) => ({
     type: 4,
@@ -92,11 +92,13 @@ export function modal(p: Project, members: { discord_id: string; name?: string }
           min_length: 8,
         }),
         label(
-          '담당자',
+          '담당자 · Notion 연결된 멤버',
           select(
             'assignee',
             members.map((m) => ({
-              label: (m.name || m.discord_id).slice(0, 100),
+              label:
+                (m.name || m.discord_id).slice(0, m.discord_id === viewerId ? 96 : 100) +
+                (m.discord_id === viewerId ? ' (나)' : ''),
               value: m.discord_id,
             })),
           ),

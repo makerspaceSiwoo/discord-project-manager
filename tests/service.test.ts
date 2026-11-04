@@ -1105,11 +1105,21 @@ describe('이슈 전용 활성화와 서버 멤버 접근', () => {
     await expect(beginLink(e, p, who)).rejects.toThrow('설정');
   });
 
-  it('/이슈 생성는 연결된 담당자가 있으면 즉시 모달을 열고 다른 서버는 거부한다', async () => {
+  it('/이슈 생성은 연결된 다른 담당자도 선택 가능하고 본인을 첫 옵션으로 표시한다', async () => {
     p.memberRoleId = '';
     p.features = { issues: true, automation: false };
     await run(e.DB, 'UPDATE projects SET config=? WHERE id=?', JSON.stringify(p), p.id);
     await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+    await run(
+      e.DB,
+      'INSERT INTO links VALUES(?,?,?,?,?)',
+      p.id,
+      '00000',
+      'other-linked-person',
+      0,
+      0,
+    );
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, '22222', 'expired-person', 0, 1);
     const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
     const hex = (a: ArrayBuffer) =>
       Array.from(new Uint8Array(a), (v) => v.toString(16).padStart(2, '0')).join('');
@@ -1139,7 +1149,13 @@ describe('이슈 전용 활성화와 서버 멤버 접근', () => {
       );
       const value: any = await response.json();
       expect(value.type).toBe(guildId === p.guildId ? 9 : 4);
-      if (guildId === p.guildId) expect(value.data.custom_id).toBe('issue:required');
+      if (guildId === p.guildId) {
+        expect(value.data.custom_id).toBe('issue:required');
+        const options = value.data.components[2].component.options;
+        expect(options.map((o: any) => o.value)).toEqual([id, '00000']);
+        expect(options[0].label).toContain('(나)');
+        expect(options[1].label).not.toContain('(나)');
+      }
     }
   });
 });
@@ -1839,4 +1855,37 @@ it('마감 후 수동 결과는 월요일 보고 전에도 게시하며 Cron은 
   await schedule(e, p, timing(week, p).report);
   expect((await jobStep(request.jobId!)).status).toBe('done');
   expect(sends).toBe(1);
+});
+
+it('연결된 다른 멤버 지정 시 그 멤버의 Notion ID를 사용하고 연결 해제 후에는 생성하지 않는다', async () => {
+  const otherId = '22222',
+    otherNotion = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+  await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, otherId, otherNotion, 0, 0);
+  // Requester without a Notion link can still assign a linked teammate; never add self implicitly.
+  expect((await linkedMembers(e, p, id)).map((m) => m.discord_id)).toEqual([otherId]);
+  const creates: any[] = [];
+  fake((url, init) => {
+    if (url.pathname.includes('/members/'))
+      return { ...member, user: { id: url.pathname.split('/').at(-1), bot: false } };
+    if (url.pathname === '/v1/pages' && init.method === 'POST') {
+      creates.push(JSON.parse(init.body));
+      return page();
+    }
+    throw new Error('unexpected request');
+  });
+  await enqueue(e.DB, 'assign-teammate', 'issue-create', {
+    userId: id,
+    draft: { ...draft, assignee: otherId },
+  });
+  expect((await jobStep('assign-teammate')).status).toBe('pending');
+  expect(creates[0].properties[p.notion.properties.assignees].people).toEqual([
+    { object: 'user', id: otherNotion },
+  ]);
+  await run(e.DB, 'DELETE FROM links WHERE discord_id=?', otherId);
+  await enqueue(e.DB, 'unlinked-teammate', 'issue-create', {
+    userId: id,
+    draft: { ...draft, assignee: otherId },
+  });
+  expect((await jobStep('unlinked-teammate')).status).toBe('failed');
+  expect(creates).toHaveLength(1);
 });
