@@ -1716,7 +1716,7 @@ describe('Cron과 직접 명령의 공통 주차 작업', () => {
       expect(reportWeek(Date.parse(date), p)).toBe('2026-11-02');
     }
   });
-  it('반복 호출과 Cron은 같은 투표·보고 작업을 공유한다', async () => {
+  it('투표는 Cron과 공유하지만 수동 보고는 요청별 작업을 만든다', async () => {
     const at = Date.parse('2026-11-08T10:00:00+09:00');
     const first = await requestAutomation(e, p, '일정투표', at);
     expect(await requestAutomation(e, p, '일정투표', at)).toEqual(first);
@@ -1727,9 +1727,7 @@ describe('Cron과 직접 명령의 공통 주차 작업', () => {
     await requestAutomation(e, p, '주간보고', at);
     await requestAutomation(e, p, '주간보고', at);
     await schedule(e, p, Date.parse('2026-11-09T10:00:00+09:00'));
-    expect(
-      await all(e.DB, 'SELECT id FROM jobs WHERE id=?', `${p.id}:2026-11-02:report`),
-    ).toHaveLength(1);
+    expect(await all(e.DB, "SELECT id FROM jobs WHERE kind='manual-report'")).toHaveLength(2);
     expect(
       await all(e.DB, 'SELECT id FROM jobs WHERE id=?', `${p.id}:2026-11-09:open`),
     ).toHaveLength(1);
@@ -1767,9 +1765,9 @@ describe('Cron과 직접 명령의 공통 주차 작업', () => {
     p.enabled = false;
     await expect(requestAutomation(e, p, '주간보고')).rejects.toThrow('비활성');
     p.enabled = true;
-    const first = await requestAutomation(e, p, '주간보고');
+    const first = await requestAutomation(e, p, '주간보고', Date.now(), 'same-failed-request');
     await run(e.DB, "UPDATE jobs SET status='review',error='uncertain'");
-    const second = await requestAutomation(e, p, '주간보고');
+    const second = await requestAutomation(e, p, '주간보고', Date.now(), 'same-failed-request');
     expect(second.jobId).toBe(first.jobId);
     expect(second.status).toBe('review');
   });
@@ -1888,4 +1886,109 @@ it('연결된 다른 멤버 지정 시 그 멤버의 Notion ID를 사용하고 �
   });
   expect((await jobStep('unlinked-teammate')).status).toBe('failed');
   expect(creates).toHaveLength(1);
+});
+
+it('완료된 주간 보고가 있어도 새 명령은 최신 Notion 스냅샷을 게시하고 동일 요청만 중복 차단한다', async () => {
+  const at = Date.now(),
+    week = reportWeek(at, p),
+    cronId = `${p.id}:${week}:report`;
+  await enqueue(e.DB, cronId, 'report', { week });
+  await run(e.DB, "UPDATE jobs SET status='done' WHERE id=?", cronId);
+  await run(
+    e.DB,
+    'INSERT INTO report_runs(id,project_id,week,complete) VALUES(?,?,?,1)',
+    cronId,
+    p.id,
+    week,
+  );
+  let queries = 0;
+  const posts: any[] = [];
+  fake((url, init) => {
+    if (url.pathname.includes('/members/')) return member;
+    if (url.pathname.endsWith('/query')) {
+      queries++;
+      const current = page({ id: 'current-' + queries });
+      current.properties[p.notion.properties.title] = {
+        title: [{ plain_text: queries === 1 ? '첫 수동 보고' : '변경된 최신 작업' }],
+      };
+      return { results: [current], has_more: false };
+    }
+    if (url.pathname.endsWith('/messages')) {
+      const body = JSON.parse(init.body);
+      posts.push(body);
+      return { id: 'posted-' + posts.length, ...body };
+    }
+    throw new Error('unexpected request');
+  });
+  const [first, retry] = await Promise.all([
+    requestAutomation(e, p, '주간보고', at, 'interaction-first'),
+    requestAutomation(e, p, '주간보고', at, 'interaction-first'),
+  ]);
+  expect(first.jobId).toBe(retry.jobId);
+  for (let step = 0; step < 3; step++) await jobStep(first.jobId!);
+  expect(
+    (await one(e.DB, 'SELECT complete FROM report_runs WHERE id=?', first.jobId)).complete,
+  ).toBe(1);
+  // Discord retry at a week boundary must still reuse the original invocation.
+  const lateRetry = await requestAutomation(
+    e,
+    p,
+    '주간보고',
+    at + 7 * 86400000,
+    'interaction-first',
+  );
+  expect(lateRetry.jobId).toBe(first.jobId);
+  await jobStep(lateRetry.jobId!);
+  expect(queries).toBe(1);
+  const second = await requestAutomation(e, p, '주간보고', at + 1, 'interaction-second');
+  expect(second.jobId).not.toBe(first.jobId);
+  for (let step = 0; step < 3; step++) await jobStep(second.jobId!);
+  expect(queries).toBe(2);
+  expect(posts).toHaveLength(2);
+  expect(posts[0].embeds[0].title).toContain('첫 수동 보고');
+  expect(posts[1].embeds[0].title).toContain('변경된 최신 작업');
+  for (const post of posts) {
+    expect(post.content).toContain('@everyone');
+    expect(post.content).not.toContain('[테스트]');
+    expect(post.allowed_mentions.parse).toEqual(['everyone']);
+  }
+  expect(
+    (await all(e.DB, 'SELECT * FROM report_items WHERE report_id=?', first.jobId)).map(
+      (i) => i.page_id,
+    ),
+  ).toEqual(['current-1']);
+  expect(
+    (await all(e.DB, 'SELECT * FROM report_items WHERE report_id=?', second.jobId)).map(
+      (i) => i.page_id,
+    ),
+  ).toEqual(['current-2']);
+  expect(await all(e.DB, 'SELECT * FROM report_runs WHERE complete=1')).toHaveLength(3);
+  await schedule(e, p, Date.parse(week + 'T10:00:00+09:00'));
+  expect((await jobStep(cronId)).status).toBe('done');
+  expect(posts).toHaveLength(2);
+  await run(
+    e.DB,
+    'INSERT INTO sessions VALUES(?,?,?,?,?)',
+    await hash('report-session'),
+    id,
+    '본인',
+    'csrf',
+    Date.now() + 60000,
+  );
+  const get = async (path: string) =>
+    (
+      await worker.fetch(
+        new Request(e.APP_ORIGIN + path, { headers: { cookie: 'session=report-session' } }),
+        e,
+        ctx,
+      )
+    ).json() as Promise<any>;
+  const list = await get('/api/reports');
+  expect(list.filter((r: any) => r.manualRun)).toHaveLength(2);
+  expect(list.every((r: any) => !r.testRun && r.week === week)).toBe(true);
+  const detail = await get('/api/reports/' + encodeURIComponent(second.jobId!));
+  expect(detail.manualRun).toBe(true);
+  expect(detail.testRun).toBe(false);
+  expect(detail.week).toBe(week);
+  expect(detail.items[0].title).toBe('변경된 최신 작업');
 });

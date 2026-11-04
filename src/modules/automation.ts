@@ -1,5 +1,6 @@
 import { AppError, type Env, type Project } from '../core/types';
-import { one, run } from '../core/db';
+import { one, run, enqueue } from '../core/db';
+import { random } from '../core/crypto';
 import { addDays, currentWeek, localDate, timing } from './scheduling';
 
 export const automationCommands = ['주간보고', '일정투표', '투표결과'];
@@ -13,7 +14,7 @@ export function reportWeek(at: number, p: Project) {
   return addDays(date, day === 0 ? -6 : 1 - day);
 }
 
-// Cron and commands share the same weekly key and delivery effects.
+// Poll commands and Cron share weekly keys; manual reports are separate invocations.
 async function requestJob(
   env: Env,
   p: Project,
@@ -37,7 +38,13 @@ async function requestJob(
   const job = await one(env.DB, 'SELECT status,error FROM jobs WHERE id=?', jobId);
   return { jobId, status: job.status as string, error: job.error as string | null };
 }
-export async function requestAutomation(env: Env, p: Project, command: string, at = Date.now()) {
+export async function requestAutomation(
+  env: Env,
+  p: Project,
+  command: string,
+  at = Date.now(),
+  requestId = random(),
+) {
   if (!p.enabled) throw new AppError(409, '프로젝트가 비활성 상태입니다.');
   if (command === '일정투표') {
     const week = upcomingWeek(at, p);
@@ -48,11 +55,17 @@ export async function requestAutomation(env: Env, p: Project, command: string, a
     };
   }
   if (command === '주간보고') {
-    const week = reportWeek(at, p);
-    const job = await requestJob(env, p, week, 'report', 'report', at);
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(requestId))
+      throw new AppError(400, '보고 요청 ID가 올바르지 않습니다.');
+    const jobId = `${p.id}:report:manual:${requestId}`;
+    await enqueue(env.DB, jobId, 'manual-report', { week: reportWeek(at, p), requestId }, at);
+    const job = await one(env.DB, 'SELECT status,error,payload FROM jobs WHERE id=?', jobId);
+    const week = JSON.parse(job.payload).week;
     return {
-      ...job,
-      content: `${week} 주간 보고 · <#${p.reportChannelId}>\n${env.APP_ORIGIN}/?report=${encodeURIComponent(job.jobId)}`,
+      jobId,
+      status: job.status as string,
+      error: job.error as string | null,
+      content: `${week} 주간 보고 · <#${p.reportChannelId}>\n${env.APP_ORIGIN}/?report=${encodeURIComponent(jobId)}`,
     };
   }
   if (command === '투표결과') {

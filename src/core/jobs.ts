@@ -262,7 +262,12 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
   if (kind === 'assignee-notify') return null;
   const week = payload.week,
     pollId = testRun ? `test:${p.id}:${payload.testId}` : `${p.id}:${week}`,
-    storedWeek = testRun ? `${week}#test:${payload.testId}` : week,
+    manualReport = kind === 'report' && manualRun && !!payload.requestId,
+    storedWeek = testRun
+      ? `${week}#test:${payload.testId}`
+      : manualReport
+        ? `${week}#manual:${payload.requestId}`
+        : week,
     t = week ? timing(week, p) : null;
   if (kind === 'poll-open') {
     if (!testRun && Date.now() >= t!.closes)
@@ -409,7 +414,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       job.id,
       p.id,
       storedWeek,
-      testRun ? week : null,
+      testRun || manualReport ? week : null,
     );
     if (payload.refreshPresentation && !s.collected)
       throw new AppError(409, '기존 보고 스냅샷만 수정할 수 있습니다.');

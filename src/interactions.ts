@@ -47,7 +47,7 @@ export async function interactions(req: Request, env: Env, p: Project, ctx: Exec
     return ephemeral(`설정 및 연동 진단: ${env.APP_ORIGIN}/?view=admin`);
   }
   if (i.type === 2 && automationCommands.includes(automationCommand)) {
-    ctx.waitUntil(processAutomationCommand(env, p, automationCommand, i.token));
+    ctx.waitUntil(processAutomationCommand(env, p, automationCommand, i.token, i.id));
     return json({ type: 5, data: { flags: 64 } });
   }
   if (!issuesEnabled(p)) return ephemeral('이슈 생성이 비활성 상태입니다.');
@@ -211,10 +211,16 @@ async function processConfirmedIssue(env: Env, p: Project, jobId: string, token:
   }
 }
 
-async function processAutomationCommand(env: Env, p: Project, command: string, token: string) {
+async function processAutomationCommand(
+  env: Env,
+  p: Project,
+  command: string,
+  token: string,
+  requestId: string,
+) {
   let content: string;
   try {
-    const result = await requestAutomation(env, p, command);
+    const result = await requestAutomation(env, p, command, Date.now(), requestId);
     if ('jobId' in result && result.jobId) {
       // Bounded immediate progress; Cron continues paginated work and retries.
       for (let step = 0; step < 3; step++) {
@@ -231,7 +237,9 @@ async function processAutomationCommand(env: Env, p: Project, command: string, t
       const job = await one(env.DB, 'SELECT status,error FROM jobs WHERE id=?', result.jobId);
       const status =
         job?.status === 'done'
-          ? '게시된 메시지를 확인해 주세요. 같은 주차는 중복 발송하지 않습니다.'
+          ? command === '주간보고'
+            ? '요청한 주간 보고가 게시되었습니다. 다시 실행하면 최신 내용으로 새 보고를 발송합니다.'
+            : '게시된 메시지를 확인해 주세요. 같은 주차는 중복 발송하지 않습니다.'
           : ['failed', 'review'].includes(job?.status)
             ? '처리가 중단되었습니다. 관리자에게 연동 상태 확인을 요청해 주세요.'
             : '요청을 접수했습니다. 예약 작업이 이어서 처리합니다.';

@@ -654,7 +654,7 @@ async function reports() {
       el(
         'a',
         { class: 'linkrow', href: '/?report=' + encodeURIComponent(r.id) },
-        `${r.testRun ? '[테스트] ' : ''}${r.week} 주간 보고 · ${r.complete ? '게시 완료' : '수집 또는 게시 중'}`,
+        `${r.testRun ? '[테스트] ' : r.manualRun ? '[직접 실행] ' : ''}${r.week} 주간 보고${r.createdAt ? ' · ' + new Date(r.createdAt).toLocaleString('ko-KR', { timeZone: me.project.timezone }) : ''} · ${r.complete ? '게시 완료' : '수집 또는 게시 중'}`,
       ),
     );
   app.append(box);
@@ -664,7 +664,7 @@ async function showReport(id) {
   app.replaceChildren(
     heading(
       'WEEKLY REPORT',
-      (r.testRun ? '[테스트] ' : '') + r.week + ' · 주간 보고',
+      (r.testRun ? '[테스트] ' : r.manualRun ? '[직접 실행] ' : '') + r.week + ' · 주간 보고',
       r.complete
         ? '확정된 보고서 스냅샷입니다. 최신 정보는 Notion 원문을 확인하세요.'
         : '수집 또는 Discord 게시가 진행 중입니다.',

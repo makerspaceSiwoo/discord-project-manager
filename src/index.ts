@@ -175,14 +175,19 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
       return json(
         await all(
           env.DB,
-          'SELECT id,COALESCE(display_week,week) AS week,display_week IS NOT NULL AS testRun,complete FROM report_runs WHERE project_id=? ORDER BY week DESC LIMIT 104',
+          `SELECT r.id,COALESCE(r.display_week,r.week) AS week,instr(r.week,'#test:')>0 AS testRun,instr(r.week,'#manual:')>0 AS manualRun,r.complete,j.created_at AS createdAt FROM report_runs r LEFT JOIN jobs j ON j.id=r.id WHERE r.project_id=? ORDER BY COALESCE(r.display_week,r.week) DESC,j.created_at DESC,r.id DESC LIMIT 104`,
           p.id,
         ),
       );
     const report = path.match(/^\/api\/reports\/([^/]+)$/);
     if (report && req.method === 'GET') {
       const id = decodeURIComponent(report[1]),
-        row = await one(env.DB, 'SELECT * FROM report_runs WHERE id=? AND project_id=?', id, p.id);
+        row = await one(
+          env.DB,
+          'SELECT r.*,j.created_at AS createdAt FROM report_runs r LEFT JOIN jobs j ON j.id=r.id WHERE r.id=? AND r.project_id=?',
+          id,
+          p.id,
+        );
       if (!row) throw new AppError(404, '보고서가 없습니다.');
       const offset = Math.max(0, Math.floor(Number(url.searchParams.get('offset')) || 0));
       const items = await all(
@@ -194,7 +199,8 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
       return json({
         ...row,
         week: row.display_week || row.week,
-        testRun: !!row.display_week,
+        testRun: row.week.includes('#test:'),
+        manualRun: row.week.includes('#manual:'),
         items: items.map((i) => ({
           ...JSON.parse(i.payload),
           discordUrl: i.thread_id
