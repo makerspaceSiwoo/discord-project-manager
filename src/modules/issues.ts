@@ -34,24 +34,25 @@ export function validateDraft(input: any, p: Project): Draft {
     throw new AppError(400, '상세 설명은 1,800자까지 입력할 수 있습니다.');
   return { ...input, due, title: input.title.trim(), description: input.description || '' };
 }
+const statusColors: Record<string, string> = {
+  default: '⬜',
+  gray: '◻️',
+  brown: '🟫',
+  orange: '🟧',
+  yellow: '🟨',
+  green: '🟩',
+  blue: '🟦',
+  purple: '🟪',
+  pink: '🩷',
+  red: '🟥',
+};
 export function issueStatus(i: Issue) {
-  const state = i.archived ? '보관/휴지통' : i.status;
-  const key = state.replace(/\s/g, '').toLowerCase();
-  const emoji = i.archived
-    ? '📦'
-    : /^(완료|done|complete|completed)$/.test(key)
-      ? '✅'
-      : /^(진행중|inprogress|doing)$/.test(key)
-        ? '🟦'
-        : /^(보류|대기|onhold|blocked)$/.test(key)
-          ? '⏸️'
-          : /^(중단|취소|cancelled|canceled)$/.test(key)
-            ? '⛔'
-            : '⬜';
-  return `${emoji} ${safeText(state)}`;
+  return i.archived
+    ? '📦 보관/휴지통'
+    : `${statusColors[i.statusColor || 'default'] || '⬜'} ${safeText(i.status)}`;
 }
 export function issueThreadName(i: Issue) {
-  return `${safeText(i.taskId)} · ${issueStatus(i)} · ${safeText(i.title)}`.slice(0, 100);
+  return `[${safeText(i.taskId)}] ${safeText(i.title)}`.slice(0, 100);
 }
 export function issueSummary(i: Issue, discordUsers: string[]) {
   const assignees = discordUsers.length
@@ -59,7 +60,7 @@ export function issueSummary(i: Issue, discordUsers: string[]) {
     : i.assignees.length
       ? 'Notion 담당자 (Discord 연결 없음)'
       : '미지정';
-  return `**${safeText(i.taskId)} · ${safeText(i.title).slice(0, 150)}**\n\n> **상태 : ${issueStatus(i)}**\n유형 : ${safeText(i.type)}\n마감일 : ${i.due || '없음'}\n우선순위 : ${safeText(i.priority)}\n담당자 : ${assignees}\n\n${safeText(i.description).slice(0, 700)}\n\n<${i.url}>`;
+  return `**[${safeText(i.taskId)}] ${safeText(i.title).slice(0, 150)}**\n\n상태 : **${issueStatus(i)}**\n유형 : ${safeText(i.type)}\n마감일 : ${i.due || '없음'}\n우선순위 : ${safeText(i.priority)}\n담당자 : ${assignees}\n\n<${i.url}>`;
 }
 export function modal(p: Project, members: { discord_id: string; name?: string }[]) {
   const label = (name: string, component: any) => ({ type: 18, label: name, component });

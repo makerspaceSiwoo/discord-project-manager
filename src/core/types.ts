@@ -77,6 +77,7 @@ export interface Issue {
   type: string;
   priority: string;
   status: string;
+  statusColor?: string;
   created: string;
   parentIds: string[];
   archived: boolean;

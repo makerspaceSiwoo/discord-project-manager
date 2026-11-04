@@ -1,3 +1,4 @@
+import { scheduleIssueSync } from '../src/modules/issue-sync';
 import {
   requestEmailLink,
   approveEmailRequest,
@@ -806,7 +807,7 @@ describe('추가 회귀 검증', () => {
       await enqueue(e.DB, key, 'issue-sync', { pageId: 'page-1' });
       expect((await jobStep(key)).status).toBe('done');
     }
-    expect((await all(e.DB, "SELECT * FROM jobs WHERE kind='assignee-notify'")).length).toBe(1);
+    expect((await all(e.DB, "SELECT * FROM jobs WHERE kind='assignee-notify'")).length).toBe(0);
   });
   it('보관된 Notion 페이지는 본문 재조회 없이 상태를 반영', async () => {
     await run(
@@ -1363,13 +1364,14 @@ describe('날짜 입력과 이슈 표시', () => {
   it('각 필드를 세로로 표시하고 상태를 강조하며 내부 식별자는 표시하지 않는다', () => {
     const i = new Notion(e).normalize(p, page());
     i.status = '진행 중';
+    i.statusColor = 'blue';
     const content = issueSummary(i, [id]);
     expect(content).toContain(
-      '> **상태 : 🟦 진행 중**\n유형 : 기능\n마감일 : 2026-11-09\n우선순위 : 높음\n담당자 : <@11111>',
+      '상태 : **🟦 진행 중**\n유형 : 기능\n마감일 : 2026-11-09\n우선순위 : 높음\n담당자 : <@11111>',
     );
     expect(content).not.toMatch(/\[(?:연수리:)?[a-f0-9]{12,24}\]/);
-    expect(issueThreadName(i)).toBe('TASK-1 · 🟦 진행 중 · 업무');
-    expect(issueSummary({ ...i, status: '완료' }, [])).toContain('✅ 완료');
+    expect(issueThreadName(i)).toBe('[TASK-1] 업무');
+    expect(issueSummary({ ...i, status: '완료', statusColor: 'green' }, [])).toContain('🟩 완료');
     expect(issueSummary({ ...i, archived: true }, [])).toContain('📦 보관/휴지통');
   });
   it('nonce로 복구하고 이전 메시지의 마커도 읽되 타인의 메시지는 무시한다', async () => {
@@ -1404,7 +1406,7 @@ describe('날짜 입력과 이슈 표시', () => {
   });
 });
 
-it('기존 요약과 알려진 봇 알림의 내부 마커만 제거하고 재멘션하지 않는다', async () => {
+it('요약을 수정하고 알려진 봇 알림만 삭제하며 재멘션하지 않는다', async () => {
   const noticeId = 'notice';
   const marker = `[연수리:${(await hash(noticeId)).slice(0, 18)}]`;
   await run(
@@ -1431,29 +1433,98 @@ it('기존 요약과 알려진 봇 알림의 내부 마커만 제거하고 재�
   fake((url, init) => {
     if (url.pathname.endsWith('/pages/page-1')) {
       const result = page();
-      result.properties[p.notion.properties.status] = { status: { name: '진행 중' } };
+      result.properties[p.notion.properties.status] = {
+        status: { name: '진행 중', color: 'blue' },
+      };
       return result;
     }
     if (url.pathname.includes('/children')) return { results: [] };
-    if (url.pathname.endsWith('/messages/notice-message') && init.method !== 'PATCH')
+    if (url.pathname.endsWith('/messages/notice-message') && init.method !== 'DELETE')
       return {
         author: { id: e.DISCORD_APPLICATION_ID },
         content: '새 담당자: <@11111>\n' + marker,
       };
-    if (init.method === 'PATCH') edits.push({ path: url.pathname, ...JSON.parse(init.body) });
+    if (['PATCH', 'DELETE'].includes(init.method))
+      edits.push({ method: init.method, path: url.pathname, ...JSON.parse(init.body || '{}') });
     return { id: 'ok' };
   });
-  await enqueue(e.DB, 'refresh', 'issue-sync', { pageId: 'page-1', refreshPresentation: true });
+  await enqueue(e.DB, 'refresh', 'issue-sync', {
+    pageId: 'page-1',
+    refreshPresentation: true,
+    removeActivityNotices: true,
+  });
   const result = await jobStep('refresh');
   expect(result.status).toBe('done');
-  expect(JSON.parse(result.state).cleanedMessages).toBe(1);
-  expect(edits.find((x) => x.path.endsWith('/messages/notice-message')).content).toBe(
-    '새 담당자: <@11111>',
-  );
+  expect(JSON.parse(result.state).removedNotices).toBe(1);
+  expect(edits.find((x) => x.path.endsWith('/messages/notice-message')).method).toBe('DELETE');
   expect(edits.find((x) => x.path.endsWith('/messages/starter')).content).toContain('🟦 진행 중');
   for (const edit of edits.filter((x) => x.content))
     expect(edit.allowed_mentions).toEqual({ parse: [] });
   expect(
     await one(e.DB, "SELECT 1 FROM jobs WHERE status='pending' AND kind='assignee-notify'"),
   ).toBeNull();
+});
+
+it('동기화는 여섯 속성과 상태 색상만 감지하고 스레드 제목과 알림을 변경하지 않는다', async () => {
+  await run(
+    e.DB,
+    'INSERT INTO issue_links(page_id,project_id,request_id,thread_id,message_id) VALUES(?,?,?,?,?)',
+    'page-1',
+    p.id,
+    'r',
+    'thread',
+    'starter',
+  );
+  let current = page();
+  const edits: any[] = [];
+  fake((url, init) => {
+    if (url.pathname.endsWith('/pages/page-1')) return current;
+    if (url.pathname.includes('/children')) throw new Error('unrelated body read');
+    if (init.method === 'PATCH') {
+      expect(url.pathname).toContain('/messages/starter');
+      edits.push(JSON.parse(init.body));
+    }
+    return { id: 'ok' };
+  });
+  async function sync(key: string) {
+    await enqueue(e.DB, key, 'issue-sync', { pageId: 'page-1' });
+    expect((await jobStep(key)).status).toBe('done');
+  }
+  await sync('first');
+  current.last_edited_time = '2026-11-20T00:00:00Z';
+  current.properties['기타'] = { rich_text: [{ plain_text: 'changed' }] };
+  await sync('unrelated');
+  expect(edits).toHaveLength(1);
+  current.properties[p.notion.properties.status] = { status: { name: '보류', color: 'yellow' } };
+  await sync('status');
+  expect(edits).toHaveLength(2);
+  expect(edits[1].content).toContain('상태 : **🟨 보류**');
+  expect(edits[1].content).toContain('**[TASK-1] 업무**');
+  current.properties[p.notion.properties.status].status.color = 'red';
+  await sync('color');
+  expect(edits[2].content).toContain('🟥 보류');
+  expect(await one(e.DB, "SELECT 1 FROM jobs WHERE kind='assignee-notify'")).toBeNull();
+});
+
+it('주간 자동화가 꺼져도 연결된 이슈를 순환 조회하고 폴링 작업을 재사용한다', async () => {
+  p.features = { issues: true, automation: false };
+  for (const page of ['page-a', 'page-b'])
+    await run(
+      e.DB,
+      'INSERT INTO issue_links(page_id,project_id,request_id,thread_id,message_id) VALUES(?,?,?,?,?)',
+      page,
+      p.id,
+      page,
+      'thread',
+      'starter',
+    );
+  await scheduleIssueSync(e, p, 1000);
+  await scheduleIssueSync(e, p, 1001);
+  expect((await all(e.DB, "SELECT * FROM jobs WHERE kind='issue-sync'")).length).toBe(2);
+  await run(e.DB, "UPDATE jobs SET status='done'");
+  await scheduleIssueSync(e, p, 62000);
+  expect((await all(e.DB, 'SELECT * FROM jobs')).length).toBe(2);
+  p.features.issues = false;
+  await scheduleIssueSync(e, p, 123000);
+  expect((await all(e.DB, "SELECT * FROM jobs WHERE status='pending'")).length).toBe(1);
 });

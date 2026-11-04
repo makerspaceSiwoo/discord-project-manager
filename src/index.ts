@@ -1,3 +1,4 @@
+import { scheduleIssueSync } from './modules/issue-sync';
 import {
   emailCapabilities,
   requestEmailLink,
@@ -254,6 +255,7 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
         });
       }
       if (path === '/api/admin/run' && req.method === 'POST') {
+        await scheduleIssueSync(env, p);
         await schedule(env, p);
         await processOne(env, p);
         return json({ ok: true });
@@ -317,6 +319,7 @@ export default {
     ctx.waitUntil(
       (async () => {
         const p = await project(env);
+        await scheduleIssueSync(env, p);
         await schedule(env, p);
         await processOne(env, p);
       })(),

@@ -73,7 +73,15 @@ export class Discord {
         matches.push(t);
         continue;
       }
-      if (!taskId || !notionUrl || !t.name.startsWith(safeText(taskId) + ' · ')) continue;
+      if (
+        !taskId ||
+        !notionUrl ||
+        !(
+          t.name.startsWith(safeText(taskId) + ' · ') ||
+          t.name.startsWith('[' + safeText(taskId) + '] ')
+        )
+      )
+        continue;
       const starter = await this.api(`/channels/${t.id}/messages/${t.id}`);
       if (
         starter.author?.id === this.env.DISCORD_APPLICATION_ID &&

@@ -1,6 +1,7 @@
+import { syncIssue } from '../modules/issue-sync';
 import { Discord, safeText } from '../adapters/discord';
 import { Http } from '../adapters/http';
-import { Notion, plain } from '../adapters/notion';
+import { Notion } from '../adapters/notion';
 import { issueSummary, issueThreadName, validateDraft } from '../modules/issues';
 import { addDays, currentWeek, timing } from '../modules/scheduling';
 import { rank, reportable, reportMessage } from '../modules/reporting';
@@ -242,141 +243,9 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
     await enqueue(db, `${job.id}:initial-sync`, 'issue-sync', { pageId: s.pageId });
     return null;
   }
-  if (job.kind === 'issue-sync') {
-    const link = await one(
-      db,
-      'SELECT * FROM issue_links WHERE page_id=? AND project_id=?',
-      payload.pageId,
-      p.id,
-    );
-    if (!link?.thread_id) return null;
-    let page: any;
-    try {
-      page = await n.api(`/pages/${payload.pageId}`);
-    } catch (e) {
-      if (e instanceof RemoteError && e.status === 404) {
-        await d.withOpenThread(link.thread_id, () =>
-          d.edit(
-            p.issueChannelMode === 'forum' ? link.thread_id : p.issueChannelId,
-            link.message_id,
-            'Notion 페이지 삭제 또는 접근 불가 · 대화 기록은 보존됩니다.',
-          ),
-        );
-        return null;
-      }
-      throw e;
-    }
-    if (link.last_edited && page.last_edited_time < link.last_edited) return null;
-    const i = n.normalize(p, page);
-    // Discord contains a bounded summary, the Notion link remains the full source.
-    const body = i.archived
-      ? { results: [] }
-      : await n.api(`/blocks/${page.id}/children?page_size=25`);
-    i.description = body.results
-      .map((b: any) => plain(b[b.type]?.rich_text))
-      .filter(Boolean)
-      .join('\n');
-    const mappings = await all(
-      db,
-      'SELECT discord_id,notion_id FROM links WHERE project_id=? AND (valid_until=0 OR valid_until>?)',
-      p.id,
-      Date.now(),
-    );
-    const assigned = mappings.filter((m) => i.assignees.includes(m.notion_id));
-    const previous: string[] = JSON.parse(link.assignees),
-      newOnes = assigned.filter((m) => !previous.includes(m.notion_id));
-    let cleanedMessages = 0;
-    await d.withOpenThread(link.thread_id, async () => {
-      await d.api(`/channels/${link.thread_id}`, 'PATCH', {
-        name: issueThreadName(i),
-      });
-      await d.edit(
-        p.issueChannelMode === 'forum' ? link.thread_id : p.issueChannelId,
-        link.message_id,
-        issueSummary(
-          i,
-          assigned.map((m) => m.discord_id),
-        ),
-      );
-      if (payload.refreshPresentation) {
-        // Only rewrite known bot notifications belonging to this linked issue.
-        const notices = await all(
-          db,
-          `SELECT e.id,e.result FROM effects e JOIN jobs j ON j.id=e.id
-          WHERE e.state='done' AND j.kind='assignee-notify' AND json_extract(j.payload,'$.pageId')=?
-          AND json_extract(j.payload,'$.threadId')=? ORDER BY j.created_at DESC LIMIT 4`,
-          i.id,
-          link.thread_id,
-        );
-        for (const notice of notices) {
-          const messageId = JSON.parse(notice.result).id;
-          let message: any;
-          try {
-            message = await d.api(`/channels/${link.thread_id}/messages/${messageId}`);
-          } catch (error) {
-            if (error instanceof RemoteError && error.status === 404) continue;
-            throw error;
-          }
-          const marker = `[연수리:${(await hash(notice.id)).slice(0, 18)}]`;
-          if (
-            message.author?.id !== env.DISCORD_APPLICATION_ID ||
-            !message.content?.endsWith('\n' + marker)
-          )
-            continue;
-          await d.edit(link.thread_id, messageId, message.content.slice(0, -marker.length - 1));
-          cleanedMessages++;
-        }
-      }
-    });
-    await db.batch([
-      ...newOnes.map((m) =>
-        db
-          .prepare(
-            'INSERT OR IGNORE INTO jobs(id,kind,payload,next_at,created_at) VALUES(?,?,?,?,?)',
-          )
-          .bind(
-            `assignee:${i.id}:${i.edited}:${m.discord_id}`,
-            'assignee-notify',
-            JSON.stringify({
-              pageId: i.id,
-              notionId: m.notion_id,
-              userId: m.discord_id,
-              threadId: link.thread_id,
-            }),
-            Date.now(),
-            Date.now(),
-          ),
-      ),
-      db
-        .prepare('UPDATE issue_links SET last_edited=?,assignees=? WHERE page_id=?')
-        .bind(i.edited, JSON.stringify(i.assignees), i.id),
-    ]);
-    return payload.refreshPresentation
-      ? { finished: true, presentationUpdated: true, cleanedMessages }
-      : null;
-  }
-  if (job.kind === 'assignee-notify') {
-    const mapping = await one(
-      db,
-      'SELECT 1 FROM links WHERE project_id=? AND discord_id=? AND notion_id=? AND (valid_until=0 OR valid_until>?)',
-      p.id,
-      payload.userId,
-      payload.notionId,
-      Date.now(),
-    );
-    if (!mapping) return null;
-    const page = await n.api(`/pages/${payload.pageId}`),
-      i = n.normalize(p, page);
-    if (i.archived || !i.assignees.includes(payload.notionId)) return null;
-    try {
-      await d.member(p, payload.userId);
-    } catch (e) {
-      if (e instanceof AppError && e.status === 403) return null;
-      throw e;
-    }
-    await sent(job.id, payload.threadId, `새 담당자: <@${payload.userId}>`, [payload.userId], true);
-    return null;
-  }
+  if (job.kind === 'issue-sync') return syncIssue(env, p, n, d, payload);
+  // Drain old queued notifications without creating new activity messages.
+  if (job.kind === 'assignee-notify') return null;
   const week = payload.week,
     pollId = `${p.id}:${week}`,
     t = week ? timing(week, p) : null;
