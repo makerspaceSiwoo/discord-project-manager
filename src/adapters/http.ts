@@ -11,7 +11,9 @@ export class Http {
     if (++this.calls > 16) throw new RemoteError('budget', 429, 60);
     const method = init.method || 'GET';
     try {
-      const res = await this.fetcher(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      // Worker native fetch rejects a class instance as its receiver.
+      const fetcher = this.fetcher;
+      const res = await fetcher(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
       if (!res.ok) {
         const seconds = Number(res.headers.get('retry-after'));
         let body: any = {};

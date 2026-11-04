@@ -1,3 +1,4 @@
+import { Http } from '../src/adapters/http';
 import { Discord } from '../src/adapters/discord';
 import { Notion } from '../src/adapters/notion';
 import { createIssuePage } from '../src/core/issue-creation';
@@ -1089,5 +1090,14 @@ describe('이슈 전용 활성화와 서버 멤버 접근', () => {
       expect(value.type).toBe(guildId === p.guildId ? 9 : 4);
       if (guildId === p.guildId) expect(value.data.custom_id).toBe('issue:required');
     }
+  });
+});
+
+describe('Worker native fetch 호환성', () => {
+  it('전역 fetch를 mock하지 않아도 Http가 JSON 응답을 읽는다', async () => {
+    const http = new Http();
+    await expect(
+      http.request('fixture', 'https://http-fixture.test/ok', { method: 'POST', body: 'test' }),
+    ).resolves.toEqual({ ok: true, method: 'POST' });
   });
 });
