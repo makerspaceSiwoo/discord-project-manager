@@ -43,11 +43,10 @@ const props = [
   'parent',
   'children',
   'discord',
-  'requestId',
 ];
 if (props.some((k) => typeof p.notion.properties[k] !== 'string' || !p.notion.properties[k]))
   fail('Notion 속성 매핑 누락');
-if (new Set(Object.values(p.notion.properties)).size !== props.length)
+if (new Set(props.map((key) => p.notion.properties[key])).size !== props.length)
   fail('서로 다른 속성을 매핑해야 합니다.');
 if (p.enabled) {
   for (const key of [

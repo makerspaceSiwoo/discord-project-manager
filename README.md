@@ -30,6 +30,8 @@ npm run build
 
 `npm run build`는 **배포하지 않고** Worker 번들과 정적 자산 구성을 검사합니다. 모든 개발 의존성은 버전과 lockfile로 고정되어 있습니다. 비밀값은 로컬 `.dev.vars` 또는 GitHub Actions Secrets·Cloudflare Worker Secrets에 두고 Git에 넣지 않습니다.
 
+Notion 이슈 DB에는 `요청 ID` 속성이 필요하지 않습니다. 생성 API는 최대 5초 동안 기다리며, 결과가 불명확하면 자동 재생성을 중단하고 확인을 안내합니다. 봇 내부의 작업 기록은 유지합니다.
+
 ## 포함 기능
 
 | 영역      | 구현                                                                                                                                                                 |

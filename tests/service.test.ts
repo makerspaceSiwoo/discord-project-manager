@@ -1,3 +1,5 @@
+import { Notion } from '../src/adapters/notion';
+import { createIssuePage } from '../src/core/issue-creation';
 import { env } from 'cloudflare:workers';
 import { reset, applyD1Migrations } from 'cloudflare:test';
 import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
@@ -645,52 +647,73 @@ describe('중복 방지와 복구', () => {
   });
 });
 describe('추가 회귀 검증', () => {
-  it('확인 버튼 재전송은 같은 생성 작업을 재사용', async () => {
-    await run(
-      e.DB,
-      'INSERT INTO drafts VALUES(?,?,?,?,0)',
-      'draft-id',
-      id,
-      JSON.stringify(draft),
-      Date.now() + 60000,
-    );
-    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
-    fake((url) => (url.pathname.includes('/members/') ? member : page()));
-    const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
-    const toHex = (a: ArrayBuffer) =>
-      Array.from(new Uint8Array(a), (v) => v.toString(16).padStart(2, '0')).join('');
-    const customEnv = {
-      ...e,
-      DISCORD_PUBLIC_KEY: toHex(await crypto.subtle.exportKey('raw', keys.publicKey)),
-    };
-    const body = JSON.stringify({
-        id: 'interaction',
-        type: 3,
-        guild_id: p.guildId,
-        member,
-        data: { custom_id: 'issue:confirm:draft-id' },
-      }),
-      ts = String(Math.floor(Date.now() / 1000));
-    const signature = toHex(
-      await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(ts + body)),
-    );
-    const tasks: Promise<any>[] = [];
-    const context = { ...ctx, waitUntil: (t: Promise<any>) => tasks.push(t) };
-    for (let i = 0; i < 2; i++) {
-      const r = await worker.fetch(
-        new Request(e.APP_ORIGIN + '/interactions', {
-          method: 'POST',
-          body,
-          headers: { 'x-signature-ed25519': signature, 'x-signature-timestamp': ts },
-        }),
-        customEnv,
-        context as any,
+  it.each([false, true])(
+    '확인 버튼 재전송은 동일 작업을 재사용하고 비공개 결과를 갱신한다 (실패=%s)',
+    async (uncertain) => {
+      await run(
+        e.DB,
+        'INSERT INTO drafts VALUES(?,?,?,?,0)',
+        'draft-id',
+        id,
+        JSON.stringify(draft),
+        Date.now() + 60000,
       );
-      expect(r.status).toBe(200);
-    }
-    await Promise.all(tasks);
-    expect((await all(e.DB, "SELECT * FROM jobs WHERE kind='issue-create'")).length).toBe(1);
-  });
+      await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+      const notices: any[] = [];
+      let creates = 0;
+      fake((url, init) => {
+        if (url.pathname.includes('/members/')) return member;
+        if (url.pathname.endsWith('/messages/@original')) {
+          notices.push(JSON.parse(init.body));
+          return {};
+        }
+        creates++;
+        return uncertain ? new Response('{}', { status: 500 }) : page();
+      });
+      const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+      const toHex = (a: ArrayBuffer) =>
+        Array.from(new Uint8Array(a), (v) => v.toString(16).padStart(2, '0')).join('');
+      const customEnv = {
+        ...e,
+        DISCORD_PUBLIC_KEY: toHex(await crypto.subtle.exportKey('raw', keys.publicKey)),
+      };
+      const body = JSON.stringify({
+          id: 'interaction',
+          token: 'private-interaction-token',
+          type: 3,
+          guild_id: p.guildId,
+          member,
+          data: { custom_id: 'issue:confirm:draft-id' },
+        }),
+        ts = String(Math.floor(Date.now() / 1000));
+      const signature = toHex(
+        await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(ts + body)),
+      );
+      const tasks: Promise<any>[] = [];
+      const context = { ...ctx, waitUntil: (t: Promise<any>) => tasks.push(t) };
+      for (let i = 0; i < 2; i++) {
+        const r = await worker.fetch(
+          new Request(e.APP_ORIGIN + '/interactions', {
+            method: 'POST',
+            body,
+            headers: { 'x-signature-ed25519': signature, 'x-signature-timestamp': ts },
+          }),
+          customEnv,
+          context as any,
+        );
+        expect(r.status).toBe(200);
+        const response: any = await r.json();
+        expect(response.type).toBe(i === 0 ? 5 : 4);
+        expect(response.data.flags).toBe(64);
+      }
+      await Promise.all(tasks);
+      expect(creates).toBe(1);
+      expect(notices).toHaveLength(1);
+      expect(notices[0].content).toContain(uncertain ? '자동 재생성을 중단' : 'Notion 이슈가 생성');
+      expect(notices[0].allowed_mentions).toEqual({ parse: [] });
+      expect((await all(e.DB, "SELECT * FROM jobs WHERE kind='issue-create'")).length).toBe(1);
+    },
+  );
   it('잘못된 Discord 서명은 PING도 거부', async () => {
     const r = await worker.fetch(
       new Request(e.APP_ORIGIN + '/interactions', { method: 'POST', body: '{"type":1}' }),
@@ -757,5 +780,167 @@ describe('추가 회귀 검증', () => {
     await enqueue(e.DB, 'one', 'dm', { pollId: 'poll', userId: id });
     await Promise.all([processOne(e, p, 'one'), processOne(e, p, 'one')]);
     expect((await one(e.DB, 'SELECT status FROM jobs WHERE id=?', 'one')).status).toBe('done');
+  });
+});
+
+describe('Notion 요청 ID 없는 생성', () => {
+  it('Notion 자동 ID를 읽고 요청 ID 속성 없이 생성한다', async () => {
+    let sent: any;
+    fake((url, init) => {
+      expect(url.pathname).toBe('/v1/pages');
+      sent = JSON.parse(init.body);
+      return page();
+    });
+    const created = await new Notion(e).create(p, draft, nid);
+    expect(Object.keys(sent.properties).sort()).toEqual(
+      [
+        p.notion.properties.title,
+        p.notion.properties.due,
+        p.notion.properties.assignees,
+        p.notion.properties.type,
+        p.notion.properties.priority,
+        p.notion.properties.status,
+      ].sort(),
+    );
+    expect(new Notion(e).normalize(p, created).taskId).toBe('TASK-1');
+  });
+
+  it('Notion 생성 요청의 5초 제한이 실제 abort로 연결된다', async () => {
+    const original = AbortSignal.timeout.bind(AbortSignal);
+    const deadline = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockImplementation((ms) => original(ms === 5000 ? 1 : ms));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            const fail = () => reject(new DOMException('Timeout', 'AbortError'));
+            if (init.signal!.aborted) fail();
+            else init.signal!.addEventListener('abort', fail, { once: true });
+          }),
+      ),
+    );
+    await expect(
+      createIssuePage(e.DB, new Notion(e), p, draft, nid, 'timeout'),
+    ).rejects.toMatchObject({ code: 'notion_create_uncertain' });
+    expect(deadline).toHaveBeenCalledWith(5000);
+    expect((await one(e.DB, "SELECT state FROM effects WHERE id='timeout:notion'")).state).toBe(
+      'sending',
+    );
+  });
+
+  it.each(['network', '500', '408', 'invalid-json', 'missing-id'])(
+    '%s 생성 결과는 즉시 review로 중단하고 관리자 재시도도 POST하지 않는다',
+    async (failure) => {
+      await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+      let creates = 0;
+      fake((url, init) => {
+        if (url.pathname.includes('/members/')) return member;
+        if (url.pathname === '/v1/pages' && init.method === 'POST') {
+          creates++;
+          if (failure === 'network') throw new Error('response lost after creation');
+          if (failure === 'invalid-json') return new Response('invalid JSON', { status: 200 });
+          if (failure === 'missing-id') return {};
+          return new Response('{}', { status: Number(failure) });
+        }
+        throw new Error('unexpected call');
+      });
+      await enqueue(e.DB, 'uncertain-job', 'issue-create', { userId: id, draft });
+      const first = await jobStep('uncertain-job');
+      expect(first.status).toBe('review');
+      expect(first.error).toContain('자동 재생성을 중단');
+      expect((await jobStep('uncertain-job')).status).toBe('review');
+      await run(
+        e.DB,
+        "UPDATE jobs SET status='pending',next_at=0,attempts=0 WHERE id='uncertain-job'",
+      );
+      expect((await jobStep('uncertain-job')).status).toBe('review');
+      expect(creates).toBe(1);
+      expect(await one(e.DB, 'SELECT * FROM issue_links')).toBeNull();
+    },
+  );
+
+  it('전송 직후 Worker가 중단된 기존 sending 효과도 재생성하지 않는다', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO effects(id,state,updated_at) VALUES(?,?,?)',
+      'crash:notion',
+      'sending',
+      0,
+    );
+    const f = fake(() => {
+      throw new Error('must not call API');
+    });
+    await expect(
+      createIssuePage(e.DB, new Notion(e), p, draft, nid, 'crash'),
+    ).rejects.toMatchObject({ code: 'notion_create_uncertain' });
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('기록된 성공은 다시 만들지 않고 재사용한다', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO effects(id,state,result,updated_at) VALUES(?,?,?,?)',
+      'saved:notion',
+      'done',
+      JSON.stringify({ id: 'page-1' }),
+      0,
+    );
+    const f = fake(() => {
+      throw new Error('must not call API');
+    });
+    expect(await createIssuePage(e.DB, new Notion(e), p, draft, nid, 'saved')).toEqual({
+      id: 'page-1',
+    });
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('명시적으로 거절된 429는 대기 후 재시도할 수 있다', async () => {
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+    let creates = 0;
+    fake((url) => {
+      if (url.pathname.includes('/members/')) return member;
+      creates++;
+      return creates === 1
+        ? new Response('{}', { status: 429, headers: { 'retry-after': '2' } })
+        : page();
+    });
+    await enqueue(e.DB, 'rate-job', 'issue-create', { userId: id, draft });
+    expect((await jobStep('rate-job')).status).toBe('pending');
+    expect(await one(e.DB, "SELECT * FROM effects WHERE id='rate-job:notion'")).toBeNull();
+    expect(JSON.parse((await jobStep('rate-job')).state).pageId).toBe('page-1');
+    expect(creates).toBe(2);
+  });
+
+  it('요청 ID가 없는 DB 스키마도 연동 검증을 통과한다', async () => {
+    const names = p.notion.properties;
+    const types: Record<string, string> = {
+      taskId: 'unique_id',
+      title: 'title',
+      due: 'date',
+      assignees: 'people',
+      type: 'select',
+      priority: 'select',
+      status: 'status',
+      created: 'created_time',
+      parent: 'relation',
+      children: 'relation',
+      discord: 'url',
+    };
+    const properties: any = Object.fromEntries(
+      Object.entries(types).map(([key, type]) => [
+        names[key as keyof typeof names],
+        { type, [type]: {} },
+      ]),
+    );
+    properties[names.type].select.options = p.notion.types.map((name) => ({ name }));
+    properties[names.priority].select.options = p.notion.priorities.map((name) => ({ name }));
+    properties[names.status].status.options = [
+      p.notion.initialStatus,
+      ...p.notion.excludedStatuses,
+    ].map((name) => ({ name }));
+    fake(() => ({ properties }));
+    expect((await new Notion(e).schema(p)).ok).toBe(true);
   });
 });

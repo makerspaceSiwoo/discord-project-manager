@@ -8,16 +8,21 @@ export class Notion {
     private env: Env,
     public http = new Http(),
   ) {}
-  api<T = any>(path: string, method = 'GET', body?: unknown): Promise<T> {
-    return this.http.request('notion', `https://api.notion.com/v1${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${this.env.NOTION_TOKEN}`,
-        'Notion-Version': this.env.NOTION_VERSION || '2026-03-11',
-        'Content-Type': 'application/json',
+  api<T = any>(path: string, method = 'GET', body?: unknown, timeoutMs = 8_000): Promise<T> {
+    return this.http.request(
+      'notion',
+      `https://api.notion.com/v1${path}`,
+      {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.env.NOTION_TOKEN}`,
+          'Notion-Version': this.env.NOTION_VERSION || '2026-03-11',
+          'Content-Type': 'application/json',
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+      timeoutMs,
+    );
   }
   query(p: Project, cursor?: string, filter?: unknown) {
     return this.api(`/data_sources/${p.notion.dataSourceId}/query`, 'POST', {
@@ -26,32 +31,27 @@ export class Notion {
       ...(filter ? { filter } : {}),
     });
   }
-  async findRequest(p: Project, requestId: string) {
-    const r = await this.query(p, undefined, {
-      property: p.notion.properties.requestId,
-      rich_text: { equals: requestId },
-    });
-    if (r.results.length > 1 || r.has_more)
-      throw new AppError(409, 'Notion 요청 ID 중복: 자동 생성을 중단합니다.');
-    return r.results[0] || null;
-  }
-  create(p: Project, d: Draft, notionId: string, requestId: string) {
+  create(p: Project, d: Draft, notionId: string) {
     const m = p.notion.properties;
-    return this.api('/pages', 'POST', {
-      parent: { type: 'data_source_id', data_source_id: p.notion.dataSourceId },
-      properties: {
-        [m.title]: { title: rich(d.title) },
-        [m.due]: { date: { start: d.due } },
-        [m.assignees]: { people: [{ object: 'user', id: notionId }] },
-        [m.type]: { select: { name: d.type } },
-        [m.priority]: { select: { name: d.priority } },
-        [m.status]: { [p.notion.statusType]: { name: p.notion.initialStatus } },
-        [m.requestId]: { rich_text: rich(requestId) },
+    return this.api(
+      '/pages',
+      'POST',
+      {
+        parent: { type: 'data_source_id', data_source_id: p.notion.dataSourceId },
+        properties: {
+          [m.title]: { title: rich(d.title) },
+          [m.due]: { date: { start: d.due } },
+          [m.assignees]: { people: [{ object: 'user', id: notionId }] },
+          [m.type]: { select: { name: d.type } },
+          [m.priority]: { select: { name: d.priority } },
+          [m.status]: { [p.notion.statusType]: { name: p.notion.initialStatus } },
+        },
+        children: d.description
+          ? [{ object: 'block', type: 'paragraph', paragraph: { rich_text: rich(d.description) } }]
+          : [],
       },
-      children: d.description
-        ? [{ object: 'block', type: 'paragraph', paragraph: { rich_text: rich(d.description) } }]
-        : [],
-    });
+      5_000,
+    );
   }
   normalize(p: Project, page: any): Issue {
     const m = p.notion.properties,
@@ -107,7 +107,6 @@ export class Notion {
       parent: ['relation'],
       children: ['relation'],
       discord: ['url'],
-      requestId: ['rich_text'],
     };
     const problems: string[] = [];
     for (const [key, allowed] of Object.entries(types)) {

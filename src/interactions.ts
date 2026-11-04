@@ -161,10 +161,8 @@ export async function interactions(req: Request, env: Env, p: Project, ctx: Exec
         ),
         env.DB.prepare('UPDATE drafts SET submitted=1 WHERE id=?').bind(id),
       ]);
-      ctx.waitUntil(processOne(env, p, jobId));
-      return ephemeral(
-        `생성 요청을 접수했습니다. 각 단계가 저장되어 장애 후에도 이어집니다.\n${env.APP_ORIGIN}/?job=${encodeURIComponent(jobId)}`,
-      );
+      ctx.waitUntil(processConfirmedIssue(env, p, jobId, i.token));
+      return json({ type: 5, data: { flags: 64 } });
     }
     return ephemeral('지원하지 않는 명령 또는 만료된 입력입니다.');
   } catch (e) {
@@ -183,4 +181,37 @@ async function ownedDraft(env: Env, id: string, user: string) {
   );
   if (!row) throw new AppError(403, '입력이 만료되었거나 본인의 입력이 아닙니다.');
   return row;
+}
+
+async function processConfirmedIssue(env: Env, p: Project, jobId: string, token: string) {
+  const statusUrl = env.APP_ORIGIN + '/?job=' + encodeURIComponent(jobId);
+  try {
+    await processOne(env, p, jobId);
+    const job = await one(env.DB, 'SELECT status,state,error FROM jobs WHERE id=?', jobId);
+    const state = JSON.parse(job?.state || '{}');
+    let content = '생성 요청을 접수했습니다. 처리 상태를 확인해 주세요.';
+    if (job?.status === 'review' || job?.status === 'failed')
+      content = job.error || '요청을 완료하지 못했습니다. 처리 상태를 확인해 주세요.';
+    else if (state.pageId)
+      content =
+        'Notion 이슈가 생성되었습니다. Discord 스레드 연결을 이어서 처리합니다.\nhttps://www.notion.so/' +
+        state.pageId.replaceAll('-', '');
+    await new Discord(env).followup(token, {
+      content: content + '\n' + statusUrl,
+      components: [],
+      allowed_mentions: { parse: [] },
+    });
+  } catch {
+    // A notification failure must never enqueue another issue creation.
+    try {
+      await new Discord(env).followup(token, {
+        content:
+          '처리 결과를 표시하지 못했습니다. 다시 생성하지 말고 상태를 확인해 주세요.\n' + statusUrl,
+        components: [],
+        allowed_mentions: { parse: [] },
+      });
+    } catch {
+      /* The persisted job is still available through the authenticated status page. */
+    }
+  }
 }

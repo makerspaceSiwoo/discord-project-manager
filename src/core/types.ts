@@ -42,8 +42,7 @@ export interface Project {
       | 'created'
       | 'parent'
       | 'children'
-      | 'discord'
-      | 'requestId',
+      | 'discord',
       string
     >;
     statusType: 'status' | 'select';
