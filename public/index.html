@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#111214" />
+    <title>플젝하는 연수리 · 함께 만드는 한 주</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="top">
+      <a class="brand" href="/" aria-label="연수리 홈"
+        ><span class="bird">연</span
+        ><span>플젝하는 연수리<small>우리 팀의 작은 프로젝트 매니저</small></span></a
+      >
+      <nav aria-label="주요 메뉴">
+        <a href="/">일정 투표</a><a href="/?view=reports">주간 보고</a
+        ><a href="/?view=account">계정 연결</a>
+      </nav>
+      <span id="user" class="user">함께 만드는 한 주</span>
+    </header>
+    <main id="app" aria-busy="true"><div class="loading">프로젝트를 불러오고 있어요…</div></main>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <footer>플젝하는 연수리 <span>작업은 Notion에, 이야기는 Discord에.</span></footer>
+  </body>
+</html>

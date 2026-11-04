@@ -1,0 +1,761 @@
+import { env } from 'cloudflare:workers';
+import { reset, applyD1Migrations } from 'cloudflare:test';
+import { beforeEach, afterEach, describe, it, expect, vi } from 'vitest';
+import config from '../config/project.example.json';
+import { aggregate, currentWeek, timing, slots, saveVote } from '../src/modules/scheduling';
+import { compareIssues, reportable, reportMessage } from '../src/modules/reporting';
+import { matchComment, beginLink, inspectLink, confirmLink, unlink } from '../src/modules/linking';
+import { validateDraft, fields, modal } from '../src/modules/issues';
+import { hash, discordSignature, notionSignature } from '../src/core/crypto';
+import { all, one, run, enqueue } from '../src/core/db';
+import { effect } from '../src/core/effects';
+import { processOne, schedule } from '../src/core/jobs';
+import { authorize, callback, startLogin } from '../src/core/auth';
+import { RemoteError, type Env, type Project, type Issue } from '../src/core/types';
+import worker from '../src/index';
+const e = env as unknown as Env & { TEST_MIGRATIONS: any };
+let p: Project;
+const ctx = { waitUntil: () => {}, passThroughOnException: () => {} } as ExecutionContext;
+const id = '11111',
+  nid = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const who = {
+  userId: id,
+  name: '테스트',
+  sessionHash: 'original-session',
+  csrf: 'csrf',
+  admin: false,
+};
+const member = { user: { id, bot: false }, roles: ['team'], permissions: '0' };
+const draft = {
+  title: '새 작업',
+  due: '2026-11-10',
+  assignee: id,
+  type: '기능',
+  priority: '높음',
+  description: '상세 설명',
+};
+function page(overrides: any = {}) {
+  const m = p.notion.properties;
+  return {
+    id: 'page-1',
+    url: 'https://www.notion.so/page-1',
+    created_time: '2026-11-01T00:00:00Z',
+    last_edited_time: '2026-11-02T00:00:00Z',
+    parent: { data_source_id: p.notion.dataSourceId },
+    properties: {
+      [m.title]: { title: [{ plain_text: '업무' }] },
+      [m.taskId]: { unique_id: { prefix: 'TASK', number: 1 } },
+      [m.due]: { date: { start: '2026-11-09' } },
+      [m.assignees]: { people: [{ id: nid }] },
+      [m.type]: { select: { name: '기능' } },
+      [m.priority]: { select: { name: '높음' } },
+      [m.status]: { status: { name: '미시작' } },
+      [m.created]: { created_time: '2026-11-01T00:00:00Z' },
+      [m.parent]: { relation: [] },
+    },
+    ...overrides,
+  };
+}
+function fake(routes: (url: URL, init: any) => any) {
+  const f = vi.fn(async (input: any, init: any = {}) => {
+    const value = await routes(new URL(typeof input === 'string' ? input : input.url), init);
+    if (value instanceof Response) return value;
+    return Response.json(value);
+  });
+  vi.stubGlobal('fetch', f);
+  return f;
+}
+async function signed(body: string) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(e.NOTION_WEBHOOK_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  return (
+    'sha256=' +
+    Array.from(
+      new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body))),
+      (b) => b.toString(16).padStart(2, '0'),
+    ).join('')
+  );
+}
+async function seedPoll(closes = Date.now() + 60_000) {
+  await run(
+    e.DB,
+    'INSERT INTO polls(id,project_id,week,opens,closes,members) VALUES(?,?,?,?,?,?)',
+    'poll',
+    p.id,
+    '2026-11-09',
+    0,
+    closes,
+    JSON.stringify([
+      { id, name: '나' },
+      { id: '22222', name: '팀원' },
+    ]),
+  );
+}
+async function jobStep(jobId: string) {
+  await run(e.DB, "UPDATE jobs SET next_at=0 WHERE id=? AND status='pending'", jobId);
+  await processOne(e, p, jobId);
+  return one(e.DB, 'SELECT * FROM jobs WHERE id=?', jobId);
+}
+beforeEach(async () => {
+  await applyD1Migrations(e.DB, e.TEST_MIGRATIONS);
+  p = structuredClone(config) as Project;
+  p.enabled = true;
+  p.guildId = 'guild';
+  p.memberRoleId = 'team';
+  p.adminRoleIds = ['admin'];
+  p.issueChannelId = 'forum';
+  p.schedulingChannelId = 'schedule';
+  p.reportChannelId = 'report';
+  p.notion.workspaceId = 'workspace';
+  p.notion.dataSourceId = 'source';
+  p.notion.probePageId = 'probe';
+  p.notion.verificationPageId = 'verify';
+  p.notion.guestEvidence = 'test fixture';
+  p.notion.guestVerificationEnabled = true;
+  await run(e.DB, 'INSERT INTO projects VALUES(?,?)', p.id, JSON.stringify(p));
+});
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  await reset();
+});
+describe('주차와 투표', () => {
+  it('KST 일요일은 다음날, 월요일은 그 주를 선택', () => {
+    expect(currentWeek(Date.parse('2026-11-08T00:00:00+09:00'))).toBe('2026-11-09');
+    expect(currentWeek(Date.parse('2026-11-09T00:00:00+09:00'))).toBe('2026-11-09');
+    expect(currentWeek(Date.parse('2026-12-31T00:00:00+09:00'))).toBe('2026-12-28');
+  });
+  it('일요일 9시, 23시, 월요일 0시와 9시 경계', () => {
+    const t = timing('2026-11-09', p);
+    expect(new Date(t.opens).toISOString()).toBe('2026-11-08T00:00:00.000Z');
+    expect(t.closes - t.reminder).toBe(3600_000);
+    expect(t.report - t.closes).toBe(9 * 3600_000);
+  });
+  it('196개 슬롯과 마지막 일요일 22:30 구간, 범위 검증', () => {
+    expect(slots([195, 0, 0])).toEqual([0, 195]);
+    expect(() => slots([196])).toThrow();
+    expect(() => slots([1.5])).toThrow();
+    expect(() => slots(['0'])).toThrow();
+    expect(slots([])).toEqual([]);
+  });
+  it('미응답과 가능한 시간 없음 분리', () => {
+    const g = aggregate(
+      [
+        { id: 'a', name: 'A' },
+        { id: 'b', name: 'B' },
+        { id: 'c', name: 'C' },
+      ],
+      [
+        { user_id: 'a', slots: '[0]' },
+        { user_id: 'b', slots: '[]' },
+      ],
+      0,
+    );
+    expect(g.available[0].id).toBe('a');
+    expect(g.unavailable[0].id).toBe('b');
+    expect(g.unanswered[0].id).toBe('c');
+  });
+  it('마감 1ms 전 저장 가능, 마감 시각에는 SQL에서 차단', async () => {
+    await seedPoll(1000);
+    await saveVote(e.DB, p, 'poll', id, [195], 999);
+    await expect(saveVote(e.DB, p, 'poll', id, [], 1000)).rejects.toThrow('마감');
+    expect((await one(e.DB, 'SELECT slots FROM votes')).slots).toBe('[195]');
+  });
+  it('대상 아닌 사용자 거부하고 빈 응답은 저장', async () => {
+    await seedPoll();
+    await expect(saveVote(e.DB, p, 'poll', 'outsider', [1])).rejects.toThrow();
+    await saveVote(e.DB, p, 'poll', id, []);
+    expect((await one(e.DB, 'SELECT slots FROM votes')).slots).toBe('[]');
+  });
+  it('다른 주차 응답과 격리', async () => {
+    await seedPoll();
+    await saveVote(e.DB, p, 'poll', id, [1]);
+    await run(
+      e.DB,
+      'INSERT INTO polls(id,project_id,week,opens,closes,members) SELECT ?,project_id,?,opens,closes,members FROM polls',
+      'poll2',
+      '2026-11-16',
+    );
+    await saveVote(e.DB, p, 'poll2', id, [2]);
+    expect(
+      (await all(e.DB, 'SELECT slots FROM votes ORDER BY poll_id')).map((x) => x.slots),
+    ).toEqual(['[1]', '[2]']);
+  });
+});
+describe('인증과 권한', () => {
+  it('Discord Ed25519 서명, 변조 및 오래된 요청 거부', async () => {
+    const pair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const hex = (a: ArrayBuffer) =>
+      Array.from(new Uint8Array(a), (x) => x.toString(16).padStart(2, '0')).join('');
+    const key = hex(await crypto.subtle.exportKey('raw', pair.publicKey));
+    const ts = String(Math.floor(Date.now() / 1000)),
+      body = '{"type":1}';
+    const signature = hex(
+      await crypto.subtle.sign('Ed25519', pair.privateKey, new TextEncoder().encode(ts + body)),
+    );
+    expect(await discordSignature(body, signature, ts, key)).toBe(true);
+    expect(await discordSignature(body + 'x', signature, ts, key)).toBe(false);
+    expect(await discordSignature(body, signature, '1', key)).toBe(false);
+  });
+  it('Notion 원본 본문 HMAC 검증', async () => {
+    const b = '{"id":"a"}';
+    expect(await notionSignature(b, await signed(b), e.NOTION_WEBHOOK_SECRET)).toBe(true);
+    expect(await notionSignature(b + ' ', await signed(b), e.NOTION_WEBHOOK_SECRET)).toBe(false);
+  });
+  it('세션 없는 API 거부', async () => {
+    const r = await worker.fetch(new Request('http://localhost:8787/api/polls'), e, ctx);
+    expect(r.status).toBe(401);
+  });
+  it('매 요청 역할 확인 및 CSRF 거부', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO sessions VALUES(?,?,?,?,?)',
+      await hash('session'),
+      id,
+      '이름',
+      'csrf',
+      Date.now() + 60_000,
+    );
+    const f = fake(() => member);
+    const req = new Request('http://localhost:8787/api/polls/poll', {
+      method: 'PUT',
+      headers: { cookie: 'session=session', origin: e.APP_ORIGIN, 'x-csrf-token': 'bad' },
+      body: '{}',
+    });
+    await expect(authorize(req, e, p)).rejects.toThrow('CSRF');
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+  it('역할 상실 시 세션과 연결 삭제', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO sessions VALUES(?,?,?,?,?)',
+      await hash('session'),
+      id,
+      '이름',
+      'csrf',
+      Date.now() + 60_000,
+    );
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 60_000);
+    fake(() => ({ ...member, roles: [] }));
+    await expect(
+      authorize(
+        new Request('http://localhost/api/me', { headers: { cookie: 'session=session' } }),
+        e,
+        p,
+      ),
+    ).rejects.toThrow('역할');
+    expect(await one(e.DB, 'SELECT 1 FROM links')).toBeNull();
+    expect(await one(e.DB, 'SELECT 1 FROM sessions')).toBeNull();
+  });
+  it('OAuth state가 원래 브라우저에 바인딩되고 한 번만 소비', async () => {
+    const res = await startLogin(e),
+      state = new URL(res.headers.get('location')!).searchParams.get('state')!,
+      browser = res.headers.get('set-cookie')!.split(';')[0];
+    fake((url) =>
+      url.pathname.endsWith('/oauth2/token')
+        ? { access_token: 'access' }
+        : url.pathname.endsWith('/users/@me')
+          ? { id, username: 'me' }
+          : member,
+    );
+    await expect(
+      callback(
+        new Request('http://localhost/auth/callback?state=' + state + '&code=x', {
+          headers: { cookie: 'oauth_browser=wrong' },
+        }),
+        e,
+        p,
+      ),
+    ).rejects.toThrow('만료');
+    const ok = await callback(
+      new Request('http://localhost/auth/callback?state=' + state + '&code=x', {
+        headers: { cookie: browser },
+      }),
+      e,
+      p,
+    );
+    expect(ok.status).toBe(302);
+    await expect(
+      callback(
+        new Request('http://localhost/auth/callback?state=' + state + '&code=x', {
+          headers: { cookie: browser },
+        }),
+        e,
+        p,
+      ),
+    ).rejects.toThrow('만료');
+  });
+  it('API에서 userId를 바꿔 다른 투표 수정 불가', async () => {
+    await seedPoll();
+    await run(
+      e.DB,
+      'INSERT INTO sessions VALUES(?,?,?,?,?)',
+      await hash('s'),
+      id,
+      '이름',
+      'csrf',
+      Date.now() + 60_000,
+    );
+    fake(() => member);
+    const r = await worker.fetch(
+      new Request(e.APP_ORIGIN + '/api/polls/poll', {
+        method: 'PUT',
+        headers: { cookie: 'session=s', origin: e.APP_ORIGIN, 'x-csrf-token': 'csrf' },
+        body: JSON.stringify({ slots: [1], userId: '22222' }),
+      }),
+      e,
+      ctx,
+    );
+    expect(r.status).toBe(400);
+    expect(await one(e.DB, 'SELECT 1 FROM votes')).toBeNull();
+  });
+});
+describe('게스트 댓글 인증 (모의 API)', () => {
+  const comment = (code: string) => ({
+    id: 'comment',
+    created_by: { id: nid },
+    created_time: new Date(Date.now() + 1).toISOString(),
+    last_edited_time: new Date(Date.now() + 1).toISOString(),
+    rich_text: [{ plain_text: code }],
+  });
+  it('검증되지 않은 프로젝트는 기본 차단', async () => {
+    p.notion.guestVerificationEnabled = false;
+    await expect(beginLink(e, p, who)).rejects.toThrow('실환경');
+  });
+  it('복사/중복 댓글과 수정 댓글은 실패', async () => {
+    const c = comment('code');
+    await expect(matchComment([c, c], await hash('code'), 0, Date.now() + 10000)).rejects.toThrow(
+      '중복',
+    );
+    await expect(
+      matchComment(
+        [{ ...c, last_edited_time: '2100-01-01' }],
+        await hash('code'),
+        0,
+        Date.now() + 10000,
+      ),
+    ).rejects.toThrow('작성자');
+  });
+  it('다른 Discord 세션이 코드를 알고 있어도 검증 불가', async () => {
+    const c = await beginLink(e, p, who);
+    await expect(inspectLink(e, p, { ...who, sessionHash: 'other' }, c.id)).rejects.toThrow('세션');
+  });
+  it('실제 created_by, 원래 세션 재확인, People 지정·조회 후 연결하고 재사용 거부', async () => {
+    const c = await beginLink(e, p, who),
+      co = comment(c.code);
+    co.last_edited_time = co.created_time;
+    fake((url, init) => {
+      if (url.pathname.endsWith('/comments')) return { results: [co], has_more: false };
+      if (url.pathname.includes('/users/')) return { id: nid, type: 'person', name: '본인' };
+      return page();
+    });
+    await inspectLink(e, p, who, c.id);
+    await confirmLink(e, p, who, c.id, nid);
+    expect((await one(e.DB, 'SELECT * FROM links')).notion_id).toBe(nid);
+    await expect(confirmLink(e, p, who, c.id, nid)).rejects.toThrow('만료');
+  });
+  it('기존 다른 Discord 연결과 충돌하면 코드 소비도 롤백', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO links VALUES(?,?,?,?,?)',
+      p.id,
+      '22222',
+      nid,
+      0,
+      Date.now() + 60000,
+    );
+    const c = await beginLink(e, p, who),
+      co = comment(c.code);
+    co.last_edited_time = co.created_time;
+    fake((url) =>
+      url.pathname.endsWith('/comments')
+        ? { results: [co], has_more: false }
+        : url.pathname.includes('/users/')
+          ? { id: nid, type: 'person' }
+          : page(),
+    );
+    await inspectLink(e, p, who, c.id);
+    await expect(confirmLink(e, p, who, c.id, nid)).rejects.toThrow('다른 Discord');
+    expect((await one(e.DB, 'SELECT consumed FROM challenges WHERE id=?', c.id)).consumed).toBe(0);
+  });
+  it('People 지정 결과가 다르면 연결하지 않음', async () => {
+    const c = await beginLink(e, p, who),
+      co = comment(c.code);
+    co.last_edited_time = co.created_time;
+    fake((url) =>
+      url.pathname.endsWith('/comments')
+        ? { results: [co], has_more: false }
+        : url.pathname.includes('/users/')
+          ? { id: nid, type: 'person' }
+          : page({ properties: { [p.notion.properties.assignees]: { people: [] } } }),
+    );
+    await inspectLink(e, p, who, c.id);
+    await expect(confirmLink(e, p, who, c.id, nid)).rejects.toThrow('재조회');
+    expect(await one(e.DB, 'SELECT 1 FROM links')).toBeNull();
+  });
+  it('연결 해제 시 진행 중 코드도 무효화', async () => {
+    const c = await beginLink(e, p, who);
+    await unlink(e, p, who);
+    await expect(inspectLink(e, p, who, c.id)).rejects.toThrow('만료');
+  });
+});
+describe('보고와 이슈 입력', () => {
+  const issue = (overrides: any = {}): Issue => ({
+    id: 'a',
+    taskId: 'TASK-1',
+    title: '업무',
+    due: '2026-11-09',
+    assignees: [],
+    priority: '보통',
+    status: '미시작',
+    type: '기능',
+    created: '2026-11-01',
+    parentIds: [],
+    archived: false,
+    url: 'https://notion.so/a',
+    description: '',
+    edited: '2026-11-01',
+    ...overrides,
+  });
+  it('완료/취소/보관/하위/검증 페이지 제외', () => {
+    for (const override of [
+      { status: '완료' },
+      { status: '취소' },
+      { archived: true },
+      { parentIds: ['p'] },
+      { id: 'probe' },
+    ])
+      expect(reportable(issue(override), p)).toBe(false);
+    expect(reportable(issue({ assignees: [] }), p)).toBe(true);
+  });
+  it('마감일 → 명시 우선순위 → 생성일 → ID 안정 정렬', () => {
+    const list = [
+      issue({ id: 'z', due: null, priority: '긴급' }),
+      issue({ id: 'b' }),
+      issue({ id: 'a' }),
+      issue({ id: 'c', priority: '긴급' }),
+      issue({ id: 'd', created: '2026-10-01' }),
+      issue({ id: 'e', due: '2026-11-08' }),
+    ];
+    expect(list.sort((a, b) => compareIssues(a, b, p)).map((x) => x.id)).toEqual([
+      'e',
+      'c',
+      'd',
+      'a',
+      'b',
+      'z',
+    ]);
+  });
+  it('긴 제목/담당자도 Discord 메시지 제한 내 요약', () => {
+    expect(
+      reportMessage(
+        [issue({ title: '한'.repeat(2000), assignees: Array(30).fill(nid) })],
+        '전체 표 링크',
+      ).length,
+    ).toBeLessThan(2000);
+  });
+  it('필수값과 실제 달력 날짜 검증, 최신 Modal Label 파싱', () => {
+    expect(validateDraft(draft, p)).toEqual(draft);
+    expect(() => validateDraft({ ...draft, due: '2026-02-30' }, p)).toThrow();
+    expect(() => validateDraft({ ...draft, priority: '없는 값' }, p)).toThrow();
+    expect(modal(p, [{ discord_id: id }]).data.components).toHaveLength(5);
+    expect(fields([{ type: 18, component: { custom_id: 'type', values: ['기능'] } }])).toEqual({
+      type: '기능',
+    });
+  });
+  it('Notion 모든 페이지를 수집한 뒤 정렬하여 누락 없이 게시', async () => {
+    let query = 0;
+    fake((url, init) => {
+      if (url.pathname.endsWith('/query')) {
+        query++;
+        return query === 1
+          ? { results: [page()], has_more: true, next_cursor: 'next' }
+          : { results: [page({ id: 'page-2', created_time: '2026-10-01' })], has_more: false };
+      }
+      if (url.pathname.endsWith('/messages')) return { id: 'message-' + Math.random() };
+      throw new Error('unexpected ' + url.pathname);
+    });
+    await enqueue(e.DB, 'report-job', 'report', { week: '2026-11-09' });
+    for (let i = 0; i < 5; i++) await jobStep('report-job');
+    expect(query).toBe(2);
+    expect((await all(e.DB, 'SELECT * FROM report_items')).length).toBe(2);
+    expect((await one(e.DB, 'SELECT complete FROM report_runs')).complete).toBe(1);
+  });
+});
+describe('중복 방지와 복구', () => {
+  it('외부 생성 성공 후 응답 유실은 재생성하지 않고 조회 복구', async () => {
+    const create = vi.fn(async () => {
+      throw new RemoteError('notion', 0, 1, true);
+    });
+    await expect(effect(e.DB, 'effect', create, async () => null)).rejects.toThrow();
+    expect(await effect(e.DB, 'effect', create, async () => ({ id: 'existing' }))).toEqual({
+      id: 'existing',
+    });
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(await effect(e.DB, 'effect', create, async () => null)).toEqual({ id: 'existing' });
+  });
+  it('성공 여부 확인 불가하면 검토 상태로 중단', async () => {
+    await run(e.DB, 'INSERT INTO effects VALUES(?,?,?,?)', 'uncertain', 'sending', null, 0);
+    const create = vi.fn();
+    await expect(effect(e.DB, 'uncertain', create, async () => null)).rejects.toThrow('미확인');
+    expect(create).not.toHaveBeenCalled();
+  });
+  it('확정된 429는 다음 실행에서 재시도 가능', async () => {
+    await expect(
+      effect(
+        e.DB,
+        'rate',
+        async () => {
+          throw new RemoteError('discord', 429, 2);
+        },
+        async () => null,
+      ),
+    ).rejects.toThrow();
+    expect(await one(e.DB, 'SELECT 1 FROM effects')).toBeNull();
+  });
+  it('동일 스케줄 반복 실행과 지연 실행을 중복 예약하지 않음', async () => {
+    const at = Date.parse('2026-11-09T10:00:00+09:00');
+    await schedule(e, p, at);
+    await schedule(e, p, at);
+    expect((await all(e.DB, 'SELECT * FROM jobs')).length).toBe(4);
+    expect((await one(e.DB, 'SELECT next_week FROM schedule_cursor')).next_week).toBe('2026-11-16');
+  });
+  it('DM 거부는 해당 작업만 종료', async () => {
+    await seedPoll();
+    fake((url) =>
+      url.pathname.includes('/members/') ? member : new Response('{}', { status: 403 }),
+    );
+    await enqueue(e.DB, 'dm-job', 'dm', { pollId: 'poll', userId: id });
+    const j = await jobStep('dm-job');
+    expect(j.status).toBe('done');
+    expect(JSON.parse(j.state).skipped).toBe(true);
+  });
+  it('가능한 시간 없음 제출자는 리마인더를 보내지 않음', async () => {
+    await seedPoll();
+    await saveVote(e.DB, p, 'poll', id, []);
+    const f = fake(() => {
+      throw new Error('no call');
+    });
+    await enqueue(e.DB, 'dm-job', 'dm', { pollId: 'poll', userId: id });
+    expect((await jobStep('dm-job')).status).toBe('done');
+    expect(f).not.toHaveBeenCalled();
+  });
+  it('Notion 성공 후 Discord 일시 실패를 복구하고 Notion 중복 생성하지 않음', async () => {
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+    let notionCreates = 0,
+      forumPosts = 0;
+    fake((url, init) => {
+      if (url.pathname.includes('/members/')) return member;
+      if (
+        url.hostname === 'api.notion.com' &&
+        url.pathname === '/v1/pages' &&
+        init.method === 'POST'
+      ) {
+        notionCreates++;
+        return page();
+      }
+      if (url.pathname.endsWith('/pages/page-1')) return page();
+      if (url.pathname.endsWith('/threads') && init.method === 'POST') {
+        forumPosts++;
+        return new Response('{}', { status: 500 });
+      }
+      if (url.pathname.endsWith('/threads/active'))
+        return { threads: [{ id: 'thread', name: 'marker', parent_id: 'forum' }] };
+      if (url.pathname.includes('/threads/archived')) return { threads: [] };
+      if (url.pathname.endsWith('/messages')) return { id: 'mention' };
+      throw new Error(url.pathname);
+    });
+    await enqueue(e.DB, 'create-job', 'issue-create', { userId: id, draft });
+    expect((await jobStep('create-job')).status).toBe('pending');
+    expect((await jobStep('create-job')).status).toBe('pending');
+    const marker = '[' + (await hash('create-job')).slice(0, 12) + ']';
+    fake((url, init) => {
+      if (url.pathname.endsWith('/pages/page-1')) return page();
+      if (url.pathname.endsWith('/threads/active'))
+        return { threads: [{ id: 'thread', name: marker + ' 업무', parent_id: 'forum' }] };
+      if (url.pathname.includes('/threads/archived')) return { threads: [] };
+      if (url.pathname.includes('/members/')) return member;
+      if (url.pathname.endsWith('/messages')) return { id: 'mention' };
+      throw new Error(url.pathname);
+    });
+    await jobStep('create-job');
+    expect((await jobStep('create-job')).status).toBe('done');
+    expect(notionCreates).toBe(1);
+    expect(forumPosts).toBe(1);
+    expect((await one(e.DB, 'SELECT thread_id FROM issue_links')).thread_id).toBe('thread');
+  });
+  it('만료된 Worker lease를 다시 획득해 복구', async () => {
+    await seedPoll();
+    await saveVote(e.DB, p, 'poll', id, []);
+    await enqueue(e.DB, 'crashed', 'dm', { pollId: 'poll', userId: id });
+    await run(
+      e.DB,
+      "UPDATE jobs SET status='running',lease='old',lease_until=0 WHERE id='crashed'",
+    );
+    expect((await jobStep('crashed')).status).toBe('done');
+  });
+  it('Webhook 중복은 작업 하나, 순서가 바뀌어도 최신 Notion을 다시 읽음', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO issue_links(page_id,project_id,request_id,thread_id,message_id,assignees) VALUES(?,?,?,?,?,?)',
+      'page-1',
+      p.id,
+      'request',
+      'thread',
+      'starter',
+      JSON.stringify([nid]),
+    );
+    const body = JSON.stringify({
+      id: 'event',
+      workspace_id: 'workspace',
+      entity: { type: 'page', id: 'page-1' },
+      timestamp: '2000-01-01',
+    });
+    for (let i = 0; i < 2; i++) {
+      const r = await worker.fetch(
+        new Request(e.APP_ORIGIN + '/webhooks/notion', {
+          method: 'POST',
+          headers: { 'x-notion-signature': await signed(body) },
+          body,
+        }),
+        e,
+        ctx,
+      );
+      expect(r.status).toBe(200);
+    }
+    expect((await all(e.DB, 'SELECT * FROM jobs')).length).toBe(1);
+    const requests: any[] = [];
+    fake((url, init) => {
+      if (url.pathname.endsWith('/pages/page-1'))
+        return page({ last_edited_time: '2026-11-10T00:00:00Z' });
+      if (url.pathname.includes('/children')) return { results: [] };
+      requests.push(JSON.parse(init.body || '{}'));
+      return { id: 'ok' };
+    });
+    expect((await jobStep('webhook:event')).status).toBe('done');
+    expect((await one(e.DB, 'SELECT last_edited FROM issue_links')).last_edited).toBe(
+      '2026-11-10T00:00:00Z',
+    );
+    expect(requests.some((r) => r.content?.includes('업무'))).toBe(true);
+  });
+});
+describe('추가 회귀 검증', () => {
+  it('확인 버튼 재전송은 같은 생성 작업을 재사용', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO drafts VALUES(?,?,?,?,0)',
+      'draft-id',
+      id,
+      JSON.stringify(draft),
+      Date.now() + 60000,
+    );
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+    fake((url) => (url.pathname.includes('/members/') ? member : page()));
+    const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const toHex = (a: ArrayBuffer) =>
+      Array.from(new Uint8Array(a), (v) => v.toString(16).padStart(2, '0')).join('');
+    const customEnv = {
+      ...e,
+      DISCORD_PUBLIC_KEY: toHex(await crypto.subtle.exportKey('raw', keys.publicKey)),
+    };
+    const body = JSON.stringify({
+        id: 'interaction',
+        type: 3,
+        guild_id: p.guildId,
+        member,
+        data: { custom_id: 'issue:confirm:draft-id' },
+      }),
+      ts = String(Math.floor(Date.now() / 1000));
+    const signature = toHex(
+      await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(ts + body)),
+    );
+    const tasks: Promise<any>[] = [];
+    const context = { ...ctx, waitUntil: (t: Promise<any>) => tasks.push(t) };
+    for (let i = 0; i < 2; i++) {
+      const r = await worker.fetch(
+        new Request(e.APP_ORIGIN + '/interactions', {
+          method: 'POST',
+          body,
+          headers: { 'x-signature-ed25519': signature, 'x-signature-timestamp': ts },
+        }),
+        customEnv,
+        context as any,
+      );
+      expect(r.status).toBe(200);
+    }
+    await Promise.all(tasks);
+    expect((await all(e.DB, "SELECT * FROM jobs WHERE kind='issue-create'")).length).toBe(1);
+  });
+  it('잘못된 Discord 서명은 PING도 거부', async () => {
+    const r = await worker.fetch(
+      new Request(e.APP_ORIGIN + '/interactions', { method: 'POST', body: '{"type":1}' }),
+      e,
+      ctx,
+    );
+    expect(r.status).toBe(401);
+  });
+  it('Notion Webhook 서명 없는 이벤트는 등록하지 않음', async () => {
+    const r = await worker.fetch(
+      new Request(e.APP_ORIGIN + '/webhooks/notion', { method: 'POST', body: '{"id":"fake"}' }),
+      e,
+      ctx,
+    );
+    expect(r.status).toBe(401);
+    expect(await one(e.DB, 'SELECT 1 FROM jobs')).toBeNull();
+  });
+  it('중복 Webhook이 담당자 알림을 다시 만들지 않음', async () => {
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+    await run(
+      e.DB,
+      'INSERT INTO issue_links(page_id,project_id,request_id,thread_id,message_id) VALUES(?,?,?,?,?)',
+      'page-1',
+      p.id,
+      'request',
+      'thread',
+      'starter',
+    );
+    fake((url) =>
+      url.pathname.endsWith('/pages/page-1')
+        ? page()
+        : url.pathname.includes('/children')
+          ? { results: [] }
+          : { id: 'ok' },
+    );
+    for (const key of ['event-1', 'event-2']) {
+      await enqueue(e.DB, key, 'issue-sync', { pageId: 'page-1' });
+      expect((await jobStep(key)).status).toBe('done');
+    }
+    expect((await all(e.DB, "SELECT * FROM jobs WHERE kind='assignee-notify'")).length).toBe(1);
+  });
+  it('보관된 Notion 페이지는 본문 재조회 없이 상태를 반영', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO issue_links(page_id,project_id,request_id,thread_id,message_id) VALUES(?,?,?,?,?)',
+      'page-1',
+      p.id,
+      'request',
+      'thread',
+      'starter',
+    );
+    const f = fake((url) => {
+      if (url.pathname.includes('/children')) throw new Error('archived content inaccessible');
+      if (url.pathname.endsWith('/pages/page-1')) return page({ in_trash: true });
+      return { id: 'ok' };
+    });
+    await enqueue(e.DB, 'archived', 'issue-sync', { pageId: 'page-1' });
+    expect((await jobStep('archived')).status).toBe('done');
+    expect(f.mock.calls.some(([url, init]: any) => init?.body?.includes('보관'))).toBe(true);
+  });
+  it('동시에 실행해도 작업은 하나의 lease만 획득', async () => {
+    await seedPoll();
+    await saveVote(e.DB, p, 'poll', id, []);
+    await enqueue(e.DB, 'one', 'dm', { pollId: 'poll', userId: id });
+    await Promise.all([processOne(e, p, 'one'), processOne(e, p, 'one')]);
+    expect((await one(e.DB, 'SELECT status FROM jobs WHERE id=?', 'one')).status).toBe('done');
+  });
+});
