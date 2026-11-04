@@ -12,7 +12,11 @@
   "issueChannelMode": "forum",
   "maxMembers": 10,
   "linkLifetimeDays": 7,
-  "schedule": { "open": "09:00", "reminder": "23:00", "report": "09:00" },
+  "schedule": {
+    "open": "09:00",
+    "reminder": "23:00",
+    "report": "09:00"
+  },
   "notion": {
     "workspaceId": "",
     "databaseId": "",
@@ -32,8 +36,7 @@
       "created": "생성일",
       "parent": "상위 작업",
       "children": "하위 작업",
-      "discord": "Discord",
-      "requestId": "요청 ID"
+      "discord": "Discord"
     },
     "statusType": "status",
     "initialStatus": "미시작",

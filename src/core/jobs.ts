@@ -7,6 +7,7 @@ import { rank, reportable, reportMessage } from '../modules/reporting';
 import { all, enqueue, one, run } from './db';
 import { random, hash } from './crypto';
 import { effect } from './effects';
+import { createIssuePage, NOTION_CREATE_UNCERTAIN } from './issue-creation';
 import {
   AppError,
   RemoteError,
@@ -89,11 +90,13 @@ export async function processOne(env: Env, p: Project, preferred?: string) {
         e instanceof RemoteError && (e.status === 0 || e.status === 429 || e.status >= 500);
       const uncertain = e instanceof AppError && e.code === 'uncertain';
       const status =
-        (retry && job.attempts < 8) || (uncertain && job.attempts < 3)
-          ? 'pending'
-          : uncertain
-            ? 'review'
-            : 'failed';
+        e instanceof AppError && e.code === NOTION_CREATE_UNCERTAIN
+          ? 'review'
+          : (retry && job.attempts < 8) || (uncertain && job.attempts < 3)
+            ? 'pending'
+            : uncertain
+              ? 'review'
+              : 'failed';
       const wait =
         e instanceof RemoteError
           ? Math.max(e.retryAfter * 1000, Math.min(3600_000, 30_000 * 2 ** job.attempts))
@@ -162,12 +165,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
           409,
           '담당자 계정 연결이 없거나 만료되었습니다. 다시 연결 후 재시도하세요.',
         );
-      const page = await effect(
-        db,
-        `${job.id}:notion`,
-        () => n.create(p, draft, link.notion_id, requestId),
-        () => n.findRequest(p, requestId),
-      );
+      const page = await createIssuePage(db, n, p, draft, link.notion_id, job.id);
       await run(
         db,
         'INSERT OR IGNORE INTO issue_links(page_id,project_id,request_id) VALUES(?,?,?)',

@@ -18,7 +18,6 @@ const expected = {
   parent: ['relation'],
   children: ['relation'],
   discord: ['url'],
-  requestId: ['rich_text'],
 };
 let errors = 0;
 for (const [key, types] of Object.entries(expected)) {
