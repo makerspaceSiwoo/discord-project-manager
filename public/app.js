@@ -616,7 +616,7 @@ async function account() {
         ? '이메일을 입력하고 검색된 Notion 계정이 본인인지 확인하면 연결됩니다.'
         : '이메일을 입력해 연결을 요청하세요. 관리자가 한 번 확인하면 계속 사용할 수 있습니다.',
     ),
-    el('label', {}, 'Notion 이메일', email),
+    el('label', { class: 'account-email' }, 'Notion 이메일', email),
     action(
       '이메일로 연결 요청',
       async () => {

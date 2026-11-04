@@ -520,7 +520,8 @@ footer {
   padding: 20px;
   border-radius: 10px;
 }
-input[type='text'] {
+input[type='text'],
+input[type='email'] {
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -767,4 +768,21 @@ input[type='text'] {
     min-width: 430px;
     grid-template-columns: 42px repeat(7, minmax(45px, 1fr));
   }
+}
+
+.account-email {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 20px 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.account-email input {
+  color: #f2f3f5;
+  background: #111214;
+  font-weight: 400;
+}
+.account-email input::placeholder {
+  color: var(--muted);
 }
