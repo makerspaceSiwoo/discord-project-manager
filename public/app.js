@@ -547,12 +547,12 @@ async function account() {
       }),
     );
   }
-  if (!me.guestVerificationEnabled) {
+  if (!(me.linkingEnabled ?? me.guestVerificationEnabled)) {
     panel.append(
       el(
         'p',
         {},
-        '관리자의 게스트 환경 검증이 아직 완료되지 않았습니다. 검증 전에는 계정을 연결하지 않습니다.',
+        '계정 연결 준비 중입니다. 관리자가 인증 페이지 설정을 완료하면 이용할 수 있습니다.',
       ),
     );
     return;
@@ -590,6 +590,11 @@ async function account() {
               {},
               el('h2', {}, '이 Notion 계정이 본인인가요?'),
               el('p', {}, user.name),
+              el(
+                'p',
+                {},
+                user.email || '이메일을 제공받지 못했습니다. Notion 계정 ID를 확인해 주세요.',
+              ),
               el('code', {}, user.notionId),
               el('p', {}, user.warning),
               action(

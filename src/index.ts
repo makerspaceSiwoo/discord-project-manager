@@ -1,4 +1,5 @@
 import { Notion } from './adapters/notion';
+import { linkingEnabled } from './core/access';
 import { Discord } from './adapters/discord';
 import { authorize, callback, logout, startLogin } from './core/auth';
 import { all, one, project, run } from './core/db';
@@ -106,6 +107,7 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext) {
           p.id,
           who.userId,
         ),
+        linkingEnabled: linkingEnabled(p),
         guestVerificationEnabled: p.notion.guestVerificationEnabled,
       });
     if (path === '/api/polls' && req.method === 'GET')

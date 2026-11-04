@@ -1,6 +1,6 @@
 # 설치, 연결, 배포
 
-초기 상태는 비활성입니다. 아래 절차를 운영자가 자신의 계정에서 수행합니다. 이 저장소 구현 과정에서는 실제 서비스에 로그인·배포·게시하지 않았습니다.
+초기 상태는 비활성입니다. 새 팀 설치 절차와 기존 서버의 계정 연결 준비 방법을 안내합니다.
 
 ## 0. 설치 구조와 로컬 준비
 
@@ -40,7 +40,7 @@ npm run dev
 [Discord Developer Portal](https://discord.com/developers/applications)에서 앱을 만들고 봇 표시 이름을 **플젝하는 연수리**로 설정합니다. Application ID, Public Key, Bot Token, OAuth Client Secret을 확보합니다.
 
 - 설치 범위: `bot`, `applications.commands`. 앱의 Guild Install 설치 링크(또는 OAuth2 URL Generator로 만든 링크)를 열어 운영할 서버에 봇을 초대합니다. 서버를 관리할 권한이 있는 계정으로 진행합니다.
-- 웹 로그인 OAuth 범위: `identify`만 사용합니다. 로그인 후 bot REST로 서버 역할을 확인합니다.
+- 웹 로그인 OAuth 범위: `identify`만 사용합니다. 로그인 후 bot REST로 서버 가입과 설정된 역할을 확인합니다.
 - OAuth Redirect URI: `https://<worker>.<계정>.workers.dev/auth/callback`과 개발용 `http://localhost:8787/auth/callback`을 정확하게 등록합니다.
 - Interactions Endpoint URL: 배포 후 `https://<worker>.<계정>.workers.dev/interactions`.
 - **Server Members Intent(GUILD_MEMBERS)**를 켭니다. Gateway 연결은 사용하지 않지만 List Guild Members REST 자체가 이 설정을 요구합니다. [공식 Guild API](https://docs.discord.com/developers/resources/guild#list-guild-members)
@@ -50,7 +50,7 @@ npm run dev
 
 | 설정                | 기본 채널/역할   | 종류                              |
 | ------------------- | ---------------- | --------------------------------- |
-| memberRoleId        | 연수리-팀원      | 팀원에게 부여할 역할              |
+| memberRoleId        | 연수리-팀원      | 선택 사항. 빈 값이면 서버의 모든 일반 멤버              |
 | schedulingChannelId | 일정-투표        | 텍스트 + 주차별 스레드            |
 | issueChannelId      | 프로젝트-이슈    | 포럼, 또는 텍스트 + 이슈별 스레드 |
 | reportChannelId     | 주간-보고        | 텍스트                            |
@@ -72,7 +72,7 @@ Discord 사용자 설정 → 고급 → 개발자 모드를 켜면 서버·역�
 
 기본 실행은 읽기와 계획만 수행합니다. `--apply`는 누락된 역할/채널을 생성하고 이 앱의 지정 명령 이름만 upsert합니다. 다른 명령을 일괄 삭제하지 않습니다. 생성 직전 journal을 저장하며 응답 유실 시 재생성을 중단합니다. 실제 생성 리소스를 찾아 설정 ID에 반영하면 복구합니다. 기존 채널 구조와 권한은 덮어쓰지 않으므로 실제 접근 권한을 별도 검사하세요. 이름 중복이면 중단합니다. 이 도구는 로컬 설치 단계에만 사용하며 외부 API 429이면 실행을 멈추고 다시 실행합니다.
 
-등록 명령: `/계정연결`, `/이슈생성`, `/일정`, `/연동상태`. 마지막은 기본 관리자 전용이며 Discord 서버의 앱 명령 권한과 `adminRoleIds`를 함께 맞춥니다. 폼은 [공식 Modal 컴포넌트](https://docs.discord.com/developers/components/reference#label)에 따른 Label 안의 Text Input, String Select를 사용합니다. 최초 응답 제한 3초, 토큰 유효기간 15분을 전제로 느린 작업은 지연 응답합니다. [Interactions 응답 문서](https://docs.discord.com/developers/interactions/receiving-and-responding)
+등록 명령: `/계정연결`, `/이슈 생성`, `/일정`, `/연동상태`. 마지막은 기본 관리자 전용이며 Discord 서버의 앱 명령 권한과 `adminRoleIds`를 함께 맞춥니다. 폼은 [공식 Modal 컴포넌트](https://docs.discord.com/developers/components/reference#label)에 따른 Label 안의 Text Input, String Select를 사용합니다. 최초 응답 제한 3초, 토큰 유효기간 15분을 전제로 느린 작업은 지연 응답합니다. [Interactions 응답 문서](https://docs.discord.com/developers/interactions/receiving-and-responding)
 
 ## 2. Notion 공용 연결과 스키마
 
@@ -94,7 +94,7 @@ node --env-file=.dev.vars scripts/notion-schema.mjs config/project.local.json
 
 ## 3. 게스트 검증
 
-[별도 절차](guest-verification.md)를 실제 **게스트** 2명과 수행합니다. OAuth가 실제 환경에서 성공하고 `owner.user.id`의 의미가 검증된다면 OAuth 연결 경로를 추가할 수 있습니다. 현재 코드는 검증되지 않은 OAuth 사용자 연결을 자동 선택하지 않습니다. 댓글 대안도 검증 기록을 남기고 활성화해야 합니다.
+[별도 절차](guest-verification.md)로 실제 멤버·게스트의 계정 연결을 확인합니다. OAuth가 실제 환경에서 성공하고 `owner.user.id`의 의미가 검증된다면 OAuth 연결 경로를 추가할 수 있습니다. 현재 코드는 검증되지 않은 OAuth 사용자 연결을 자동 선택하지 않습니다. 댓글 연결은 사용자마다 실제 작성자와 People 지정을 검증합니다. 게스트 실증 기록은 성공한 경우에만 남깁니다.
 
 공용 연결 자격 증명은 `NOTION_TOKEN`, 개인 연결은 D1의 검증된 Discord/Notion ID입니다. 서로 구분합니다.
 
@@ -142,11 +142,22 @@ npm run deploy
 
 ## 6. 활성화와 템플릿 재사용
 
-관리자 계정에 팀원 역할과 관리자 역할을 부여하고 `/?view=admin`에서 진단합니다. 실제 channel type, guild ID, Notion 속성과 선택지, 대상 명단을 확인합니다. 초기 설정 도구는 전체 멤버를 페이지네이션하여 출력합니다. 웹 진단은 한 페이지와 다음 cursor를 반환합니다.
+`adminUserIds`에 관리자 Discord ID를 지정하거나 `adminRoleIds`에 관리자 역할을 지정하고 `/?view=admin`에서 진단합니다. 실제 channel type, guild ID, Notion 속성과 선택지, 대상 명단을 확인합니다. 초기 설정 도구는 전체 멤버를 페이지네이션하여 출력합니다. 웹 진단은 한 페이지와 다음 cursor를 반환합니다.
 
-게스트 인증 체크리스트의 증거를 `notion.guestEvidence`에 기록하고 `guestVerificationEnabled`를 켭니다. 공용 연결·권한을 확인한 뒤 `enabled: true` 설정을 D1에 적용합니다. 검증 직후 `/이슈생성`으로 시험 작업 1개를 만들고 변경 반영을 확인합니다.
+인증 페이지와 전용 검증 행을 준비한 뒤 `linkingEnabled: true`로 계정 연결을 엽니다. 첫 사용에는 `enabled: true`, `features: {"issues": true, "automation": false}`로 이슈만 활성화합니다. 로그인한 본인이 댓글·People 검증을 통과해야 담당자 목록에 나타납니다. `/이슈 생성`으로 실제 이슈 생성을 확인한 다음 정기 알림을 사용할 때만 `features.automation`을 켭니다. 생략한 features 값은 기존 동작과 호환되도록 활성으로 취급하므로 첫 설정에는 두 값을 명시하세요.
 
 Notion 복제 링크와 Discord 서버 템플릿 링크는 실제로 발급하지 않았습니다. 운영자가 배포용 템플릿을 만들 경우 비밀값·실제 팀 데이터·계정 연결 정보를 제거하세요. Discord 기본 템플릿이 포럼을 복제한다고 전제하지 않고, 초기 설정 도구가 누락된 포럼 또는 텍스트 대안을 보완합니다. 다른 팀은 별도 Worker와 D1을 사용하면 설정·비밀값·권한 경계가 단순합니다.
+
+
+### 기존 서버에서 계정 연결 준비
+
+이미 채널과 Notion DB가 연결되어 있다면 GitHub Actions의 **Prepare onboarding**을 사용합니다. `guild_id`, `notion_root_page_id`, `notion_source_id`를 입력하고 먼저 `apply: false`로 확인한 뒤 `true`로 실행합니다. 현재 준비 도구는 해당 원본 DB에 `담당자` People 속성이 있는 경우를 지원합니다. 다른 스키마의 팀은 인증 페이지와 전용 검증 행을 직접 만들고 아래 ID를 매핑하세요.
+
+도구는 루트 아래 `discord-project-manager · 계정 인증` 페이지와 이슈 DB의 `[봇 설정] 계정 연결 검증용` 행을 만들고 `/이슈 생성` 등 명령을 등록합니다. 기존 리소스가 있으면 재사용하며 팀 채널에 메시지를 보내지 않습니다. 검증 행은 실제 업무가 아니며 보고 대상에서 제외합니다. 이 행에도 Notion 고유 ID가 발급될 수 있습니다. 실패한 생성은 응답만 유실됐을 수 있으므로 기존 리소스를 확인한 후 재실행하세요.
+
+결과는 `INSPECTION_PUBLIC_KEY`로 암호화된 `onboarding-result` artifact로 1일간 보관됩니다. 해당 개인 키로 로컬에서 복호화하여 `verificationPageId`, `probePageId`를 `notion` 설정에, `adminUserIds`를 최상위 설정에 반영합니다. 개인 키는 GitHub에 저장하지 않습니다. 역할 없이 서버 전체 인원을 허용하려면 `memberRoleId: ""`로 설정합니다. 이 경로에서는 역할·채널 생성용 `setup.mjs --apply`가 필요 없습니다.
+
+`linkingEnabled: true`는 인증 절차를 사용할 수 있다는 뜻이며 게스트 인증 성공을 주장하는 값이 아닙니다. 실제 사용자 확인 전에는 `notion.guestVerificationEnabled: false`, `notion.guestEvidence: ""`를 그대로 둡니다. 기존 설치의 이 두 값은 호환용으로 지원합니다. 이름·이메일은 본인 확인 화면에서만 표시하며 이메일로 자동 매칭하거나 D1 연결 정보에 저장하지 않습니다.
 
 ## 7. 팀원이 사용하는 방법
 
@@ -157,7 +168,7 @@ Notion 복제 링크와 Discord 서버 템플릿 링크는 실제로 발급하�
 | 계정 연결        | Discord에서 `/계정연결` → 웹에서 Discord 로그인 → 안내된 Notion 인증 페이지에 새 댓글로 코드 작성 → 원래 브라우저에서 댓글 확인 → 본인 Notion ID 확인 후 연결 |
 | 가능한 시간 입력 | `/일정` 또는 주간 투표 메시지의 링크 → 내 시간표 → 가능한 칸 선택 → 저장. 가능한 시간이 없으면 전용 체크박스를 선택하고 저장                                  |
 | 팀 시간표 확인   | 팀 시간표에서 모든 시간대의 가능한 인원 수를 보고, 칸을 눌러 인원 확인. 응답 없음과 불가능 응답을 따로 표시하며 회의 시간을 자동 선택하지 않음                |
-| 이슈 만들기      | `/이슈생성` → 제목·마감일·연결된 담당자·유형·우선순위 입력 → 필요한 경우 설명 추가 → 최종 확인. 완료되면 Notion 이슈와 Discord 스레드가 연결됨                |
+| 이슈 만들기      | `/이슈 생성` → 제목·마감일·연결된 담당자·유형·우선순위 입력 → 필요한 경우 설명 추가 → 최종 확인. 완료되면 Notion 이슈와 Discord 스레드가 연결됨                |
 | 이슈 수정        | Notion에서 수정. Webhook과 작업 큐를 거쳐 연결된 Discord 요약에 반영                                                                                          |
 | 주간 보고 보기   | `주간-보고` 채널의 메시지와 전체 표 링크 확인                                                                                                                 |
 | 운영 상태 확인   | 관리자 `/연동상태` 또는 웹 `/?view=admin`에서 진단과 작업 상태 확인                                                                                           |

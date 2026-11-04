@@ -56,7 +56,7 @@ Workers 편집 템플릿으로 시작할 수도 있지만 D1 편집 권한이 �
 
 Cloudflare Workers & Pages에서 계정의 **workers.dev 서브도메인**을 확인하거나 최초 설정합니다. 2026-11-04 조회에서는 계정의 서브도메인 API가 404를 반환하여 URL은 미리 입력하지 않았습니다. 예시 문자열을 그대로 입력하지 마세요. URL에는 경로·쿼리를 넣지 않습니다.
 
-이 자동 배포는 workers.dev 서브도메인 등록이나 D1 생성을 대신 수행하지 않습니다. 현재 계정에는 `project-manager` DB 및 초기 테이블, `enabled: false`인 `default` 프로젝트가 이미 준비되어 있습니다. 다른 팀은 자신의 D1을 만들고 해당 ID를 Variables에 지정합니다. DB 이름은 `project-manager`, 코드 바인딩은 `DB`로 유지합니다.
+이 자동 배포는 workers.dev 서브도메인 등록이나 D1 생성을 대신 수행하지 않습니다. 현재 계정에는 `project-manager` DB 및 초기 테이블과 `default` 프로젝트가 준비되어 있습니다. 실제 활성화 상태는 D1 설정을 확인하세요. 다른 팀은 자신의 D1을 만들고 해당 ID를 Variables에 지정합니다. DB 이름은 `project-manager`, 코드 바인딩은 `DB`로 유지합니다.
 
 `wrangler.jsonc`는 로컬 개발 설정입니다. Actions는 이를 읽고 계정 ID, DB ID, APP_ORIGIN, Discord 앱 ID를 덮어쓴 `.wrangler.deploy.json`을 생성합니다. 공유 파일은 JSON 문법으로 유지하며, 운영 URL 때문에 로컬 URL을 수정할 필요가 없습니다.
 

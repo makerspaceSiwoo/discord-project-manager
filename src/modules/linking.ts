@@ -1,18 +1,11 @@
 import { Notion, plain } from '../adapters/notion';
+import { linkingEnabled } from '../core/access';
 import { hash, random } from '../core/crypto';
 import { one, run } from '../core/db';
 import { AppError, type Env, type Identity, type Project } from '../core/types';
 function enabled(p: Project) {
-  if (
-    !p.notion.guestVerificationEnabled ||
-    !p.notion.guestEvidence ||
-    !p.notion.probePageId ||
-    !p.notion.verificationPageId
-  )
-    throw new AppError(
-      409,
-      '게스트 인증 실환경 검증이 필요합니다. 관리자가 검증 절차를 완료한 후 활성화하세요.',
-    );
+  if (!linkingEnabled(p) || !p.notion.probePageId || !p.notion.verificationPageId)
+    throw new AppError(409, '계정 연결 설정이 아직 준비되지 않았습니다.');
 }
 export async function beginLink(env: Env, p: Project, who: Identity) {
   enabled(p);
@@ -95,6 +88,7 @@ export async function inspectLink(env: Env, p: Project, who: Identity, id: strin
   return {
     notionId: user.id,
     name: user.name || '(이름 제공 안 됨)',
+    email: typeof user.person?.email === 'string' ? user.person.email : null,
     commentId: comment.id,
     warning: '본인이 작성한 댓글과 Notion 계정 ID인지 확인하세요. 다른 계정이면 취소하세요.',
   };
