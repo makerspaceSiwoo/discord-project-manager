@@ -1,3 +1,11 @@
+import {
+  emailCapabilities,
+  requestEmailLink,
+  ownEmailRequest,
+  listEmailRequests,
+  approveEmailRequest,
+  cancelEmailRequest,
+} from './modules/email-linking';
 import { Notion } from './adapters/notion';
 import { linkingEnabled } from './core/access';
 import { Discord } from './adapters/discord';
@@ -143,6 +151,12 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
         throw new AppError(400, '다른 사용자를 지정할 수 없습니다.');
       return json(await saveVote(env.DB, p, decodeURIComponent(poll[1]), who.userId, body.slots));
     }
+    if (path === '/api/link/email' && req.method === 'GET')
+      return json(await ownEmailRequest(env, p, who));
+    if (path === '/api/link/email' && req.method === 'POST')
+      return json(await requestEmailLink(env, p, who, (await input()).email));
+    if (path === '/api/link/email/cancel' && req.method === 'POST')
+      return json(await cancelEmailRequest(env, p, who, (await input()).id));
     if (path === '/api/link/start' && req.method === 'POST')
       return json(await beginLink(env, p, who));
     if (path === '/api/link/inspect' && req.method === 'POST')
@@ -201,6 +215,12 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
     }
     if (path.startsWith('/api/admin/')) {
       if (!who.admin) throw new AppError(403, '관리자 권한이 필요합니다.');
+      if (path === '/api/admin/link-capabilities' && req.method === 'GET')
+        return json(await emailCapabilities(env, who));
+      if (path === '/api/admin/link-requests' && req.method === 'GET')
+        return json(await listEmailRequests(env, p, who));
+      if (path === '/api/admin/link-requests/approve' && req.method === 'POST')
+        return json(await approveEmailRequest(env, p, who, (await input()).id));
       if (path === '/api/admin/status' && req.method === 'GET')
         return json({
           config: p,
@@ -256,6 +276,10 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
             b.userId,
           ),
           env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(b.userId),
+          env.DB.prepare('DELETE FROM link_requests WHERE project_id=? AND discord_id=?').bind(
+            p.id,
+            b.userId,
+          ),
           env.DB.prepare('UPDATE challenges SET consumed=1 WHERE project_id=? AND user_id=?').bind(
             p.id,
             b.userId,
