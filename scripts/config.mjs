@@ -49,17 +49,15 @@ if (props.some((k) => typeof p.notion.properties[k] !== 'string' || !p.notion.pr
 if (new Set(props.map((key) => p.notion.properties[key])).size !== props.length)
   fail('서로 다른 속성을 매핑해야 합니다.');
 if (p.enabled) {
-  for (const key of [
-    'guildId',
-    'memberRoleId',
-    'schedulingChannelId',
-    'reportChannelId',
-    'issueChannelId',
-  ])
+  for (const key of ['guildId', 'schedulingChannelId', 'reportChannelId', 'issueChannelId'])
     if (!/^\d{5,25}$/.test(p[key])) fail(key + ' ID 필요');
   for (const key of ['workspaceId', 'databaseId', 'dataSourceId'])
     if (!/^[a-f0-9-]{32,36}$/i.test(p.notion[key])) fail('Notion ' + key + ' 필요');
-  if (!p.adminRoleIds?.length) fail('관리자 역할을 지정하세요.');
+  if (p.memberRoleId && !/^\d{5,25}$/.test(p.memberRoleId)) fail('memberRoleId 형식 오류');
+  if (!p.adminRoleIds?.length && !p.adminUserIds?.length)
+    fail('관리자 역할 또는 사용자 ID를 지정하세요.');
+  if ((p.adminUserIds || []).some((id) => !/^\d{5,25}$/.test(id)))
+    fail('관리자 사용자 ID 형식 오류');
 }
 if (
   p.notion.guestVerificationEnabled &&
@@ -69,6 +67,16 @@ if (
     ))
 )
   fail('게스트 인증 검증 기록과 인증/전용 테스트 페이지 ID 필요');
+if (
+  p.linkingEnabled &&
+  ![p.notion.probePageId, p.notion.verificationPageId].every((id) => /^[a-f0-9-]{32,36}$/i.test(id))
+)
+  fail('인증/전용 검증 페이지 ID 필요');
+if (p.linkingEnabled !== undefined && typeof p.linkingEnabled !== 'boolean')
+  fail('계정 연결 활성화 값은 boolean이어야 합니다.');
+for (const key of ['issues', 'automation'])
+  if (p.features?.[key] !== undefined && typeof p.features[key] !== 'boolean')
+    fail('기능 활성화 값은 boolean이어야 합니다.');
 if (process.argv.includes('--validate')) {
   console.log('설정 형식 검증 완료. 실제 API 권한은 별도 확인해야 합니다.');
   process.exit(0);

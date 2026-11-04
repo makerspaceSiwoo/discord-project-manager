@@ -1,3 +1,4 @@
+import { Discord } from '../src/adapters/discord';
 import { Notion } from '../src/adapters/notion';
 import { createIssuePage } from '../src/core/issue-creation';
 import { env } from 'cloudflare:workers';
@@ -250,7 +251,7 @@ describe('인증과 권한', () => {
         e,
         p,
       ),
-    ).rejects.toThrow('역할');
+    ).rejects.toThrow('멤버');
     expect(await one(e.DB, 'SELECT 1 FROM links')).toBeNull();
     expect(await one(e.DB, 'SELECT 1 FROM sessions')).toBeNull();
   });
@@ -327,7 +328,7 @@ describe('게스트 댓글 인증 (모의 API)', () => {
   });
   it('검증되지 않은 프로젝트는 기본 차단', async () => {
     p.notion.guestVerificationEnabled = false;
-    await expect(beginLink(e, p, who)).rejects.toThrow('실환경');
+    await expect(beginLink(e, p, who)).rejects.toThrow('설정');
   });
   it('복사/중복 댓글과 수정 댓글은 실패', async () => {
     const c = comment('code');
@@ -353,11 +354,13 @@ describe('게스트 댓글 인증 (모의 API)', () => {
     co.last_edited_time = co.created_time;
     fake((url, init) => {
       if (url.pathname.endsWith('/comments')) return { results: [co], has_more: false };
-      if (url.pathname.includes('/users/')) return { id: nid, type: 'person', name: '본인' };
+      if (url.pathname.includes('/users/'))
+        return { id: nid, type: 'person', name: '본인', person: { email: 'me@example.com' } };
       return page();
     });
-    await inspectLink(e, p, who, c.id);
+    expect((await inspectLink(e, p, who, c.id)).email).toBe('me@example.com');
     await confirmLink(e, p, who, c.id, nid);
+    expect(JSON.stringify(await one(e.DB, 'SELECT * FROM links'))).not.toContain('me@example.com');
     expect((await one(e.DB, 'SELECT * FROM links')).notion_id).toBe(nid);
     await expect(confirmLink(e, p, who, c.id, nid)).rejects.toThrow('만료');
   });
@@ -942,5 +945,117 @@ describe('Notion 요청 ID 없는 생성', () => {
     ].map((name) => ({ name }));
     fake(() => ({ properties }));
     expect((await new Notion(e).schema(p)).ok).toBe(true);
+  });
+});
+
+describe('이슈 전용 활성화와 서버 멤버 접근', () => {
+  it('정기 알림이 꺼져 있으면 새 예약과 기존 대기/실행 작업도 처리하지 않는다', async () => {
+    p.features = { issues: true, automation: false };
+    await schedule(e, p, Date.parse('2026-11-09T10:00:00+09:00'));
+    expect(await all(e.DB, 'SELECT * FROM jobs')).toHaveLength(0);
+    const f = fake(() => {
+      throw new Error('must not send');
+    });
+    for (const kind of ['poll-open', 'poll-remind', 'poll-close', 'report', 'dm']) {
+      await enqueue(e.DB, kind, kind, { week: '2026-11-09' }, 0);
+      await run(e.DB, "UPDATE jobs SET status='running',lease_until=0 WHERE id=?", kind);
+      await processOne(e, p, kind);
+      expect((await one(e.DB, 'SELECT attempts FROM jobs WHERE id=?', kind)).attempts).toBe(0);
+    }
+    await enqueue(e.DB, 'pending-report', 'report', { week: '2026-11-09' }, 0);
+    await processOne(e, p);
+    expect((await one(e.DB, "SELECT status FROM jobs WHERE id='pending-report'")).status).toBe(
+      'pending',
+    );
+    expect(f).not.toHaveBeenCalled();
+  });
+
+  it('정기 알림 없이 이슈 작업은 처리하고 이슈 기능을 끄면 처리하지 않는다', async () => {
+    p.features = { issues: true, automation: false };
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+    fake((url) => (url.pathname.includes('/members/') ? member : page()));
+    await enqueue(e.DB, 'enabled-issue', 'issue-create', { userId: id, draft });
+    expect(JSON.parse((await jobStep('enabled-issue')).state).pageId).toBe('page-1');
+    p.features.issues = false;
+    await enqueue(e.DB, 'disabled-issue', 'issue-create', { userId: id, draft });
+    expect((await jobStep('disabled-issue')).attempts).toBe(0);
+  });
+
+  it('역할 제한이 없으면 역할 없는 멤버도 허용하지만 봇과 탈퇴자는 거부한다', async () => {
+    p.memberRoleId = '';
+    fake(() => ({ ...member, roles: [] }));
+    expect((await new Discord(e).member(p, id)).user.id).toBe(id);
+    fake(() => ({ ...member, user: { id, bot: true }, roles: [] }));
+    await expect(new Discord(e).member(p, id)).rejects.toMatchObject({ status: 403 });
+    fake(() => new Response('{}', { status: 404 }));
+    await expect(new Discord(e).member(p, id)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it('역할 없는 서버 소유자는 명시적 관리자 ID로만 관리자 권한을 얻는다', async () => {
+    p.memberRoleId = '';
+    p.adminUserIds = [id];
+    await run(
+      e.DB,
+      'INSERT INTO sessions VALUES(?,?,?,?,?)',
+      await hash('owner-session'),
+      id,
+      'owner',
+      'csrf',
+      Date.now() + 60000,
+    );
+    fake(() => ({ ...member, roles: [] }));
+    const request = new Request(e.APP_ORIGIN + '/api/me', {
+      headers: { cookie: 'session=owner-session' },
+    });
+    expect((await authorize(request, e, p)).admin).toBe(true);
+    p.adminUserIds = ['22222'];
+    expect((await authorize(request, e, p)).admin).toBe(false);
+  });
+
+  it('명시적으로 켠 계정 연결도 인증 페이지와 검증 행이 없으면 차단한다', async () => {
+    p.linkingEnabled = true;
+    p.notion.guestVerificationEnabled = false;
+    p.notion.guestEvidence = '';
+    expect((await beginLink(e, p, who)).code).toBeTruthy();
+    p.notion.probePageId = '';
+    await expect(beginLink(e, p, who)).rejects.toThrow('설정');
+  });
+
+  it('/이슈 생성는 연결된 담당자가 있으면 즉시 모달을 열고 다른 서버는 거부한다', async () => {
+    p.memberRoleId = '';
+    p.features = { issues: true, automation: false };
+    await run(e.DB, 'UPDATE projects SET config=? WHERE id=?', JSON.stringify(p), p.id);
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+    const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+    const hex = (a: ArrayBuffer) =>
+      Array.from(new Uint8Array(a), (v) => v.toString(16).padStart(2, '0')).join('');
+    const customEnv = {
+      ...e,
+      DISCORD_PUBLIC_KEY: hex(await crypto.subtle.exportKey('raw', keys.publicKey)),
+    };
+    for (const guildId of [p.guildId, 'other-guild']) {
+      const body = JSON.stringify({
+        type: 2,
+        guild_id: guildId,
+        member: { ...member, roles: [] },
+        data: { name: '이슈', options: [{ type: 1, name: '생성' }] },
+      });
+      const ts = String(Math.floor(Date.now() / 1000));
+      const signature = hex(
+        await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(ts + body)),
+      );
+      const response = await worker.fetch(
+        new Request(e.APP_ORIGIN + '/interactions', {
+          method: 'POST',
+          body,
+          headers: { 'x-signature-ed25519': signature, 'x-signature-timestamp': ts },
+        }),
+        customEnv,
+        ctx,
+      );
+      const value: any = await response.json();
+      expect(value.type).toBe(guildId === p.guildId ? 9 : 4);
+      if (guildId === p.guildId) expect(value.data.custom_id).toBe('issue:required');
+    }
   });
 });

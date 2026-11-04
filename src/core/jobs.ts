@@ -7,6 +7,7 @@ import { rank, reportable, reportMessage } from '../modules/reporting';
 import { all, enqueue, one, run } from './db';
 import { random, hash } from './crypto';
 import { effect } from './effects';
+import { automationEnabled, issuesEnabled } from './access';
 import { createIssuePage, NOTION_CREATE_UNCERTAIN } from './issue-creation';
 import {
   AppError,
@@ -18,7 +19,7 @@ import {
   type Issue,
 } from './types';
 export async function schedule(env: Env, p: Project, at = Date.now()) {
-  if (!p.enabled) return;
+  if (!automationEnabled(p)) return;
   let cursor = await one(env.DB, 'SELECT next_week FROM schedule_cursor WHERE project_id=?', p.id);
   let week = cursor?.next_week || currentWeek(at, p.timezone);
   // One week per invocation; persisted cursor catches up without an unbounded scan.
@@ -50,7 +51,11 @@ export async function schedule(env: Env, p: Project, at = Date.now()) {
   if (statements.length) await env.DB.batch(statements);
 }
 export async function processOne(env: Env, p: Project, preferred?: string) {
-  if (!p.enabled) return;
+  const allowedKinds = [
+    ...(issuesEnabled(p) ? ['issue-create', 'issue-sync', 'assignee-notify'] : []),
+    ...(automationEnabled(p) ? ['poll-open', 'poll-remind', 'poll-close', 'report', 'dm'] : []),
+  ];
+  if (!allowedKinds.length) return;
   const owner = random(),
     at = Date.now();
   const lock = await run(
@@ -66,11 +71,12 @@ export async function processOne(env: Env, p: Project, preferred?: string) {
   try {
     job = await one<Job>(
       env.DB,
-      `UPDATE jobs SET status='running',lease=?,lease_until=?,attempts=attempts+1 WHERE id=(SELECT id FROM jobs WHERE ((status='pending' AND next_at<=?) OR (status='running' AND lease_until<?)) ${preferred ? 'AND id=?' : ''} ORDER BY next_at,created_at LIMIT 1) RETURNING *`,
+      `UPDATE jobs SET status='running',lease=?,lease_until=?,attempts=attempts+1 WHERE id=(SELECT id FROM jobs WHERE ((status='pending' AND next_at<=?) OR (status='running' AND lease_until<?)) AND kind IN (${allowedKinds.map(() => '?').join(',')}) ${preferred ? 'AND id=?' : ''} ORDER BY next_at,created_at LIMIT 1) RETURNING *`,
       owner,
       at + 180_000,
       at,
       at,
+      ...allowedKinds,
       ...(preferred ? [preferred] : []),
     );
     if (!job) return;

@@ -105,12 +105,9 @@ for (const [key, name, type] of [
   );
   if (channel) p[key] = channel.id;
 }
-const commands = [
-  { name: '계정연결', description: '본인의 Discord와 Notion 계정 연결' },
-  { name: '이슈생성', description: '새 Notion 이슈와 Discord 게시물 생성' },
-  { name: '일정', description: '주간 일정 투표와 결과 열기' },
-  { name: '연동상태', description: '관리자 연동 진단 및 복구', default_member_permissions: '0' },
-];
+const commands = JSON.parse(
+  await readFile(new URL('../config/discord-commands.json', import.meta.url), 'utf8'),
+);
 if (apply) {
   for (const c of commands)
     await api(`/applications/${app}/guilds/${p.guildId}/commands`, 'POST', { ...c, type: 1 });

@@ -1,4 +1,5 @@
 import { Discord } from '../adapters/discord';
+import { projectAdmin } from './access';
 import { Http } from '../adapters/http';
 import { hash, random } from './crypto';
 import { all, one, run } from './db';
@@ -115,8 +116,7 @@ export async function authorize(req: Request, env: Env, p: Project): Promise<Ide
     name: s.name,
     sessionHash,
     csrf: s.csrf,
-    admin:
-      p.adminRoleIds.some((r) => m.roles.includes(r)) || (BigInt(m.permissions || 0) & 8n) !== 0n,
+    admin: projectAdmin(p, s.user_id, m.roles, m.permissions || '0'),
   };
 }
 export async function logout(env: Env, identity: Identity) {

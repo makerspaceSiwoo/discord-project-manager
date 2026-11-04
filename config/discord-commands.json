@@ -1,0 +1,30 @@
+[
+  {
+    "name": "이슈",
+    "description": "프로젝트 작업 생성",
+    "type": 1,
+    "options": [
+      {
+        "type": 1,
+        "name": "생성",
+        "description": "Notion 이슈와 Discord 논의 스레드 생성"
+      }
+    ]
+  },
+  {
+    "name": "계정연결",
+    "description": "본인의 Discord와 Notion 계정 연결",
+    "type": 1
+  },
+  {
+    "name": "일정",
+    "description": "주간 일정 투표와 결과 열기",
+    "type": 1
+  },
+  {
+    "name": "연동상태",
+    "description": "관리자 연동 진단 및 복구",
+    "type": 1,
+    "default_member_permissions": "8"
+  }
+]

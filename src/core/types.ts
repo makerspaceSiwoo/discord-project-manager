@@ -19,6 +19,9 @@ export interface Project {
   guildId: string;
   memberRoleId: string;
   adminRoleIds: string[];
+  adminUserIds?: string[];
+  features?: { issues?: boolean; automation?: boolean };
+  linkingEnabled?: boolean;
   schedulingChannelId: string;
   reportChannelId: string;
   issueChannelId: string;

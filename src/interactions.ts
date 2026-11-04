@@ -1,4 +1,5 @@
 import { Discord } from './adapters/discord';
+import { projectMember, projectAdmin, issuesEnabled } from './core/access';
 import { linkedMembers } from './core/auth';
 import { discordSignature } from './core/crypto';
 import { one, run } from './core/db';
@@ -21,8 +22,8 @@ export async function interactions(req: Request, env: Env, p: Project, ctx: Exec
     return new Response('Invalid signature', { status: 401 });
   const i = JSON.parse(raw);
   if (i.type === 1) return json({ type: 1 });
-  if (i.guild_id !== p.guildId || i.member?.user?.bot || !i.member?.roles?.includes(p.memberRoleId))
-    return ephemeral('프로젝트 멤버 역할이 필요합니다.');
+  if (i.guild_id !== p.guildId || !projectMember(p, i.member || {}))
+    return ephemeral('이 서버의 프로젝트 멤버만 이용할 수 있습니다.');
   const userId = i.member.user.id,
     command = i.data?.name,
     custom = i.data?.custom_id || '';
@@ -32,42 +33,23 @@ export async function interactions(req: Request, env: Env, p: Project, ctx: Exec
     );
   if (command === '일정') return ephemeral(`이번 주차와 이전 결과: ${env.APP_ORIGIN}/`);
   if (command === '연동상태') {
-    if (
-      !p.adminRoleIds.some((r) => i.member.roles.includes(r)) &&
-      (BigInt(i.member.permissions || 0) & 8n) === 0n
-    )
+    if (!projectAdmin(p, userId, i.member.roles || [], i.member.permissions || '0'))
       return ephemeral('관리자 전용 명령입니다.');
     return ephemeral(`설정 및 연동 진단: ${env.APP_ORIGIN}/?view=admin`);
   }
-  if (!p.enabled) return ephemeral('관리자가 프로젝트 설정과 실환경 검증을 완료해야 합니다.');
+  if (!issuesEnabled(p)) return ephemeral('이슈 생성이 비활성 상태입니다.');
   try {
-    if (command === '이슈생성') {
-      // No external request before the 3-second ACK. Follow-up content is private.
-      ctx.waitUntil(
-        (async () => {
-          const members = await linkedMembers(env, p);
-          await new Discord(env).followup(
-            i.token,
-            members.length
-              ? {
-                  content: '필수 정보를 입력한 뒤 상세 설명과 최종 확인을 진행합니다.',
-                  components: [
-                    {
-                      type: 1,
-                      components: [
-                        { type: 2, style: 1, label: '이슈 정보 입력', custom_id: 'issue:open' },
-                      ],
-                    },
-                  ],
-                  allowed_mentions: { parse: [] },
-                }
-              : {
-                  content: `연결된 담당자가 없습니다. /계정연결을 먼저 진행하세요. ${env.APP_ORIGIN}/?view=account`,
-                },
-          );
-        })().catch(() => {}),
-      );
-      return json({ type: 5, data: { flags: 64 } });
+    if (
+      command === '이슈생성' ||
+      (command === '이슈' &&
+        i.data?.options?.some((option: any) => option.type === 1 && option.name === '생성'))
+    ) {
+      // The modal needs only a bounded local D1 query before the initial response.
+      const members = await linkedMembers(env, p);
+      if (!members.length)
+        return ephemeral('먼저 /계정연결로 담당자의 Notion 계정을 연결해 주세요.');
+      if (members.length > 25) return ephemeral('현재 폼은 최대 25명의 담당자를 지원합니다.');
+      return json(modal(p, members));
     }
     if (custom === 'issue:open') {
       const members = await linkedMembers(env, p);

@@ -1,5 +1,6 @@
 import { AppError, type Env, type Member, type Project, RemoteError } from '../core/types';
 import { Http } from './http';
+import { projectMember } from '../core/access';
 export class Discord {
   constructor(
     private env: Env,
@@ -18,8 +19,8 @@ export class Discord {
   async member(p: Project, id: string) {
     try {
       const m = await this.api(`/guilds/${p.guildId}/members/${id}`);
-      if (m.user?.bot || !m.roles.includes(p.memberRoleId))
-        throw new AppError(403, '프로젝트 역할이 필요합니다.');
+      if (!projectMember(p, m))
+        throw new AppError(403, '이 서버의 프로젝트 멤버만 이용할 수 있습니다.');
       return m;
     } catch (e) {
       if (e instanceof RemoteError && e.status === 404)
@@ -30,7 +31,7 @@ export class Discord {
   async rosterPage(p: Project, after = '0') {
     const members: any[] = await this.api(`/guilds/${p.guildId}/members?limit=100&after=${after}`);
     const selected: Member[] = members
-      .filter((m) => !m.user.bot && m.roles.includes(p.memberRoleId))
+      .filter((m) => projectMember(p, m))
       .map((m) => ({ id: m.user.id, name: m.nick || m.user.global_name || m.user.username }));
     return { members: selected, after: members.length === 100 ? members.at(-1).user.id : null };
   }
