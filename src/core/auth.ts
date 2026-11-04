@@ -3,9 +3,35 @@ import { projectAdmin } from './access';
 import { Http } from '../adapters/http';
 import { hash, random } from './crypto';
 import { all, one, run } from './db';
-import { AppError, type Env, type Identity, type Project } from './types';
+import { AppError, RemoteError, type Env, type Identity, type Project } from './types';
 export const cookies = (r: Request) =>
   Object.fromEntries((r.headers.get('cookie') || '').split(';').map((x) => x.trim().split('=')));
+async function loginStep<T>(
+  stage: 'token' | 'profile' | 'membership',
+  action: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (!(error instanceof RemoteError)) throw error;
+    const label = {
+      token: '로그인 토큰 발급',
+      profile: 'Discord 사용자 조회',
+      membership: '서버 멤버 확인',
+    }[stage];
+    const hint =
+      stage === 'token' && [400, 401].includes(error.status)
+        ? '앱의 OAuth 인증 정보 또는 로그인 코드 확인이 필요합니다. 로그인 시작 화면에서 다시 시도해 주세요.'
+        : stage === 'membership' && [401, 403].includes(error.status)
+          ? '관리자가 봇 토큰과 서버 접근 권한을 확인해야 합니다.'
+          : '잠시 후 로그인 시작 화면에서 다시 시도해 주세요.';
+    throw new AppError(
+      503,
+      `${label} 실패 (discord_${stage}_${error.status || 'network'}). ${hint}`,
+      `discord_${stage}_${error.status || 'network'}`,
+    );
+  }
+}
 const cookie = (env: Env, name: string, value: string, maxAge: number) =>
   `${name}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${env.APP_ORIGIN.startsWith('https:') ? '; Secure' : ''}`;
 export async function startLogin(env: Env) {
@@ -50,21 +76,35 @@ export async function callback(req: Request, env: Env, p: Project) {
   );
   if (!row) throw new AppError(400, '로그인 요청이 만료되었거나 이미 사용되었습니다.');
   const http = new Http();
-  const token = await http.request<any>('discord', 'https://discord.com/api/v10/oauth2/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: env.DISCORD_APPLICATION_ID,
-      client_secret: env.DISCORD_CLIENT_SECRET,
-      grant_type: 'authorization_code',
-      code,
-      redirect_uri: env.APP_ORIGIN + '/auth/callback',
-    }).toString(),
-  });
-  const user = await http.request<any>('discord', 'https://discord.com/api/v10/users/@me', {
-    headers: { Authorization: `Bearer ${token.access_token}` },
-  });
-  await new Discord(env, http).member(p, user.id);
+  const token = await loginStep('token', () =>
+    http.request<any>('discord', 'https://discord.com/api/v10/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: env.DISCORD_APPLICATION_ID,
+        client_secret: env.DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: env.APP_ORIGIN + '/auth/callback',
+      }).toString(),
+    }),
+  );
+  if (typeof token.access_token !== 'string' || !token.access_token)
+    throw new AppError(
+      503,
+      'Discord 토큰 응답 형식 오류 (discord_token_invalid). 로그인부터 다시 시도해 주세요.',
+    );
+  const user = await loginStep('profile', () =>
+    http.request<any>('discord', 'https://discord.com/api/v10/users/@me', {
+      headers: { Authorization: `Bearer ${token.access_token}` },
+    }),
+  );
+  if (typeof user.id !== 'string' || !/^\d+$/.test(user.id))
+    throw new AppError(
+      503,
+      'Discord 사용자 응답 형식 오류 (discord_profile_invalid). 로그인부터 다시 시도해 주세요.',
+    );
+  await loginStep('membership', () => new Discord(env, http).member(p, user.id));
   const session = random();
   await run(
     env.DB,
