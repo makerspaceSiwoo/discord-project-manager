@@ -293,6 +293,38 @@ describe('인증과 권한', () => {
       ),
     ).rejects.toThrow('만료');
   });
+  it.each([
+    ['token', 401],
+    ['profile', 403],
+    ['membership', 403],
+    ['token', 0],
+  ])('로그인 %s 실패를 구분하고 세션을 생성하지 않는다 (%s)', async (stage, status) => {
+    const start = await startLogin(e);
+    const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+    const browser = start.headers.get('set-cookie')!.split(';')[0];
+    fake((url) => {
+      const current = url.pathname.endsWith('/oauth2/token')
+        ? 'token'
+        : url.pathname.endsWith('/users/@me')
+          ? 'profile'
+          : 'membership';
+      if (current === stage) {
+        if (!status) throw new Error('sensitive network details');
+        return Response.json({ error: 'sensitive response body' }, { status: Number(status) });
+      }
+      return current === 'token' ? { access_token: 'secret-access' } : { id, username: 'me' };
+    });
+    await expect(
+      callback(
+        new Request('http://localhost/auth/callback?state=' + state + '&code=secret-code', {
+          headers: { cookie: browser },
+        }),
+        e,
+        p,
+      ),
+    ).rejects.toMatchObject({ code: `discord_${stage}_${status || 'network'}` });
+    expect(await one(e.DB, 'SELECT 1 FROM sessions')).toBeNull();
+  });
   it('API에서 userId를 바꿔 다른 투표 수정 불가', async () => {
     await seedPoll();
     await run(
