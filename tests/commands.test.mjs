@@ -7,11 +7,24 @@ const env = {
   DISCORD_BOT_TOKEN: 'test-token',
 };
 test('registers and verifies named guild commands without replacing unrelated commands', async () => {
-  const stored = [{ id: 'other', name: 'unrelated', type: 1 }];
+  const stored = [
+    { id: 'other', name: 'unrelated', type: 1 },
+    ...['주간보고', '일정투표', '투표결과'].map((name, index) => ({
+      id: 'old-' + index,
+      name,
+      type: 1,
+    })),
+  ];
   const calls = [];
   const fetcher = async (url, init) => {
     calls.push({ url, method: init.method });
     if (url.endsWith('/users/@me')) return Response.json({ id: env.DISCORD_APPLICATION_ID });
+    if (init.method === 'DELETE') {
+      const index = stored.findIndex((c) => url.endsWith('/' + c.id));
+      assert.ok(index >= 0 && stored[index].id.startsWith('old-'));
+      stored.splice(index, 1);
+      return new Response(null, { status: 204 });
+    }
     assert.equal(
       url,
       `https://discord.com/api/v10/applications/${env.DISCORD_APPLICATION_ID}/guilds/${env.GUILD_ID}/commands`,
@@ -29,12 +42,17 @@ test('registers and verifies named guild commands without replacing unrelated co
   };
   for (let i = 0; i < 2; i++) {
     const result = await registerCommands(env, fetcher);
-    for (const name of ['주간보고', '일정투표', '투표결과'])
-      assert.ok(result.some((c) => c.name === name));
+    for (const [name, sub] of [
+      ['주간', '보고'],
+      ['일정', '투표'],
+      ['투표', '결과'],
+      ['이슈', '생성'],
+    ])
+      assert.ok(result.some((c) => c.name === name && c.subcommands.includes(sub)));
   }
-  assert.equal(stored.filter((c) => c.name === '주간보고').length, 1);
+  assert.equal(stored.filter((c) => c.name === '주간보고').length, 0);
   assert.ok(stored.some((c) => c.name === 'unrelated'));
-  assert.ok(calls.every((c) => ['POST', 'GET'].includes(c.method)));
+  assert.ok(calls.every((c) => ['POST', 'GET', 'DELETE'].includes(c.method)));
 });
 test('invalid guild and mismatched bot stop command registration', async () => {
   let calls = 0;
@@ -67,5 +85,5 @@ test('honors Discord retry_after before retrying a rate-limited upsert', async (
   };
   const result = await registerCommands(env, fetcher, async (ms) => waits.push(ms));
   assert.deepEqual(waits, [750]);
-  assert.ok(result.some((c) => c.name === '투표결과'));
+  assert.ok(result.some((c) => c.name === '투표' && c.subcommands.includes('결과')));
 });

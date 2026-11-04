@@ -32,20 +32,39 @@ export async function registerCommands(
         continue;
       }
       if (!r.ok) throw new Error('Discord HTTP ' + r.status);
-      return r.json();
+      return r.status === 204 ? null : r.json();
     }
   };
   const bot = await api('/users/@me');
   if (bot.id !== env.DISCORD_APPLICATION_ID) throw new Error('Discord application mismatch');
   const path = `/applications/${env.DISCORD_APPLICATION_ID}/guilds/${env.GUILD_ID}/commands`;
   for (const command of commands) await api(path, 'POST', command);
-  const registered = await api(path);
+  let registered = await api(path);
   for (const expected of commands)
-    if (!registered.some((c) => c.name === expected.name && c.type === expected.type))
+    if (
+      !registered.some(
+        (c) =>
+          c.name === expected.name &&
+          c.type === expected.type &&
+          (expected.options || []).every((option) =>
+            c.options?.some((actual) => actual.name === option.name && actual.type === option.type),
+          ),
+      )
+    )
       throw new Error('Command registration incomplete');
+  // Remove only this application's replaced flat slash commands after validating their replacements.
+  const obsolete = (c) =>
+    c.type === 1 && !c.options?.length && ['주간보고', '일정투표', '투표결과'].includes(c.name);
+  for (const command of registered.filter(obsolete)) await api(path + '/' + command.id, 'DELETE');
+  registered = await api(path);
+  if (registered.some(obsolete)) throw new Error('Obsolete commands remain');
   return registered
     .filter((c) => commands.some((wanted) => wanted.name === c.name))
-    .map(({ id, name }) => ({ id, name }));
+    .map(({ id, name, options }) => ({
+      id,
+      name,
+      subcommands: (options || []).filter((o) => o.type === 1).map((o) => o.name),
+    }));
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {

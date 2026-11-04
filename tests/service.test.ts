@@ -1777,14 +1777,14 @@ it('새 명령은 이슈 기능과 독립적으로 비공개 지연 응답하며
     return { id: 'message-or-thread' };
   });
   for (const guild of [p.guildId, 'another-server'])
-    for (const command of ['주간보고', '일정투표', '투표결과']) {
+    for (const command of ['주간 보고', '일정 투표', '투표 결과']) {
       const body = JSON.stringify({
         id: 'command',
         type: 2,
         token: 'ephemeral-token',
         guild_id: guild,
         member,
-        data: { name: command },
+        data: { name: command.split(' ')[0], options: [{ type: 1, name: command.split(' ')[1] }] },
       });
       const ts = String(Math.floor(Date.now() / 1000));
       const signature = hex(

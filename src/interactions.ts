@@ -28,18 +28,26 @@ export async function interactions(req: Request, env: Env, p: Project, ctx: Exec
   const userId = i.member.user.id,
     command = i.data?.name,
     custom = i.data?.custom_id || '';
+  const subcommand = i.data?.options?.find((option: any) => option.type === 1)?.name;
+  const spacedCommands: Record<string, string> = {
+    '주간 보고': '주간보고',
+    '일정 투표': '일정투표',
+    '투표 결과': '투표결과',
+  };
+  const automationCommand = spacedCommands[`${command} ${subcommand}`] || command;
   if (command === '계정연결')
     return ephemeral(
       `본인 Discord 계정으로 로그인한 뒤 연결하세요.\n${env.APP_ORIGIN}/?view=account`,
     );
-  if (command === '일정') return ephemeral(`이번 주차와 이전 결과: ${env.APP_ORIGIN}/`);
+  if (command === '일정' && !subcommand)
+    return ephemeral(`이번 주차와 이전 결과: ${env.APP_ORIGIN}/`);
   if (command === '연동상태') {
     if (!projectAdmin(p, userId, i.member.roles || [], i.member.permissions || '0'))
       return ephemeral('관리자 전용 명령입니다.');
     return ephemeral(`설정 및 연동 진단: ${env.APP_ORIGIN}/?view=admin`);
   }
-  if (i.type === 2 && automationCommands.includes(command)) {
-    ctx.waitUntil(processAutomationCommand(env, p, command, i.token));
+  if (i.type === 2 && automationCommands.includes(automationCommand)) {
+    ctx.waitUntil(processAutomationCommand(env, p, automationCommand, i.token));
     return json({ type: 5, data: { flags: 64 } });
   }
   if (!issuesEnabled(p)) return ephemeral('이슈 생성이 비활성 상태입니다.');

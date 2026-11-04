@@ -62,7 +62,7 @@ export async function requestAutomation(env: Env, p: Project, command: string, a
       WHERE project_id=? AND display_week IS NULL AND thread_id IS NOT NULL ORDER BY week DESC LIMIT 1`,
       p.id,
     );
-    if (!poll) return { content: '정식 일정 투표가 없습니다. /일정투표로 먼저 열어 주세요.' };
+    if (!poll) return { content: '정식 일정 투표가 없습니다. /일정 투표로 먼저 열어 주세요.' };
     const url = `${env.APP_ORIGIN}/?poll=${encodeURIComponent(poll.id)}&tab=team`;
     if (at < poll.closes)
       return {
