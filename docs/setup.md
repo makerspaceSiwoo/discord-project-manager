@@ -185,3 +185,10 @@ node scripts/config.mjs config/project.local.json --remote
 ```
 
 코드를 수정한 경우에는 `npm run check`, `npm test`, `npm run build` 확인 후 `npm run deploy`를 실행합니다. Actions를 설정한 경우 main push가 검증·마이그레이션·배포를 실행합니다. feature 브랜치와 PR에서는 검증만 실행합니다.
+
+## 계정 연결 유지와 투표 결과 안내
+
+기본 `linkLifetimeDays: 0`은 최초 댓글·People 검증에 성공한 Discord–Notion 사용자 ID 연결을 기한 없이 저장합니다. 이슈 생성마다 Notion을 다시 인증하지 않습니다. 웹의 Discord 로그인 세션은 별도로 만료될 수 있습니다. 다른 Notion 계정으로 변경할 때는 연결을 해제하고 새 계정을 인증합니다. 기존 설치가 7일 설정이라면 설정을 0으로 변경하고 유지하려는 기존 검증 연결의 `valid_until`도 0으로 변경합니다. 기존 연결을 임의로 새 계정과 연결하지 않습니다.
+
+
+Discord 웹 로그인은 같은 브라우저에서 90일 동안 유지되며 사용 중 하루 간격으로 갱신됩니다. 유효한 로그인 쿠키가 있으면 `/auth/login`도 Discord 승인 화면을 거치지 않고 앱으로 돌아옵니다. 로그아웃·쿠키 삭제·90일간 미사용 후에는 다시 로그인해야 하지만, 별도로 저장된 Notion 연결은 유지됩니다. 서버 탈퇴/필수 역할 상실 또는 관리자 철회가 확인되면 접근과 연결을 해제합니다. 웹 앱은 Discord 데스크톱 앱의 현재 선택 계정을 감지하지 못하므로 다른 계정으로 전환하려면 로그아웃 후 다시 로그인하세요.

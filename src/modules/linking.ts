@@ -144,7 +144,12 @@ export async function confirmLink(
     const result = await env.DB.batch([
       env.DB.prepare(
         'INSERT INTO links(project_id,discord_id,notion_id,verified_at,valid_until) SELECT project_id,user_id,candidate,?,? FROM challenges WHERE id=? AND consumed=0 AND expires>? ON CONFLICT(project_id,discord_id) DO UPDATE SET notion_id=excluded.notion_id,verified_at=excluded.verified_at,valid_until=excluded.valid_until',
-      ).bind(Date.now(), Date.now() + p.linkLifetimeDays * 86400_000, id, Date.now()),
+      ).bind(
+        Date.now(),
+        p.linkLifetimeDays === 0 ? 0 : Date.now() + p.linkLifetimeDays * 86400_000,
+        id,
+        Date.now(),
+      ),
       env.DB.prepare('UPDATE challenges SET consumed=1 WHERE id=? AND consumed=0').bind(id),
     ]);
     if (!result[0].meta.changes) throw new AppError(409, '이미 사용되었거나 만료된 코드입니다.');

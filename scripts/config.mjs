@@ -16,8 +16,8 @@ for (const key of ['open', 'reminder', 'report'])
 if (p.schedule.open >= p.schedule.reminder) fail('안내 시각은 리마인더 이전이어야 합니다.');
 if (!Number.isInteger(p.maxMembers) || p.maxMembers < 1 || p.maxMembers > 25)
   fail('maxMembers는 1~25');
-if (!Number.isInteger(p.linkLifetimeDays) || p.linkLifetimeDays < 1 || p.linkLifetimeDays > 30)
-  fail('계정 재검증 주기는 1~30일');
+if (!Number.isInteger(p.linkLifetimeDays) || p.linkLifetimeDays < 0 || p.linkLifetimeDays > 30)
+  fail('계정 연결 유지 기간은 0(영구) 또는 1~30일');
 for (const list of [p.notion.types, p.notion.priorities])
   if (
     !list?.length ||

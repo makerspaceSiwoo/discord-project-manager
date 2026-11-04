@@ -11,7 +11,7 @@
   "issueChannelId": "",
   "issueChannelMode": "forum",
   "maxMembers": 10,
-  "linkLifetimeDays": 7,
+  "linkLifetimeDays": 0,
   "schedule": {
     "open": "09:00",
     "reminder": "23:00",

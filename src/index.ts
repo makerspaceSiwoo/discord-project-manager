@@ -9,7 +9,7 @@ import { AppError, RemoteError, type Env, json } from './core/types';
 import { beginLink, confirmLink, inspectLink, unlink } from './modules/linking';
 import { pollView, saveVote } from './modules/scheduling';
 import { interactions } from './interactions';
-async function handle(req: Request, env: Env, ctx: ExecutionContext) {
+async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHeaders: Headers) {
   const url = new URL(req.url),
     path = url.pathname;
   if (path === '/api/health') return json({ ok: true, service: '플젝하는 연수리' });
@@ -78,12 +78,28 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext) {
     ]);
     return json({ ok: true });
   }
-  if (path === '/auth/login' && req.method === 'GET') return startLogin(env);
+  if (path === '/auth/login' && req.method === 'GET') {
+    if (req.headers.get('cookie')) {
+      try {
+        const who = await authorize(req, env, await project(env));
+        if (who.sessionCookie) responseHeaders.set('Set-Cookie', who.sessionCookie);
+        return new Response(null, {
+          status: 302,
+          headers: { Location: '/', 'Cache-Control': 'no-store' },
+        });
+      } catch (error) {
+        if (!(error instanceof AppError && error.status === 401)) throw error;
+      }
+    }
+    return startLogin(env);
+  }
   if (path === '/auth/callback' && req.method === 'GET')
     return callback(req, env, await project(env));
   if (path.startsWith('/api/') || path === '/auth/logout') {
     const p = await project(env),
       who = await authorize(req, env, p);
+    if (who.sessionCookie && path !== '/auth/logout')
+      responseHeaders.set('Set-Cookie', who.sessionCookie);
     const input = async () => {
       const body = await req.text();
       if (body.length > 16_000) throw new AppError(413, '요청이 너무 큽니다.');
@@ -254,8 +270,9 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext) {
 }
 export default {
   async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const responseHeaders = new Headers();
     try {
-      return secure(await handle(req, env, ctx));
+      return secure(await handle(req, env, ctx, responseHeaders), responseHeaders);
     } catch (e) {
       return secure(
         json(
@@ -282,8 +299,9 @@ export default {
     );
   },
 } satisfies ExportedHandler<Env>;
-function secure(res: Response) {
+function secure(res: Response, extraHeaders?: Headers) {
   const r = new Response(res.body, res);
+  extraHeaders?.forEach((value, key) => r.headers.append(key, value));
   r.headers.set('X-Content-Type-Options', 'nosniff');
   r.headers.set('Referrer-Policy', 'no-referrer');
   r.headers.set(

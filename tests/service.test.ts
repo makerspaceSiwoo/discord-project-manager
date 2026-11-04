@@ -14,7 +14,7 @@ import { hash, discordSignature, notionSignature } from '../src/core/crypto';
 import { all, one, run, enqueue } from '../src/core/db';
 import { effect } from '../src/core/effects';
 import { processOne, schedule } from '../src/core/jobs';
-import { authorize, callback, startLogin } from '../src/core/auth';
+import { authorize, callback, startLogin, linkedMembers } from '../src/core/auth';
 import { RemoteError, type Env, type Project, type Issue } from '../src/core/types';
 import worker from '../src/index';
 const e = env as unknown as Env & { TEST_MIGRATIONS: any };
@@ -395,6 +395,7 @@ describe('게스트 댓글 인증 (모의 API)', () => {
     await confirmLink(e, p, who, c.id, nid);
     expect(JSON.stringify(await one(e.DB, 'SELECT * FROM links'))).not.toContain('me@example.com');
     expect((await one(e.DB, 'SELECT * FROM links')).notion_id).toBe(nid);
+    expect((await one(e.DB, 'SELECT * FROM links')).valid_until).toBe(0);
     await expect(confirmLink(e, p, who, c.id, nid)).rejects.toThrow('만료');
   });
   it('기존 다른 Discord 연결과 충돌하면 코드 소비도 롤백', async () => {
@@ -583,8 +584,8 @@ describe('중복 방지와 복구', () => {
     expect((await jobStep('dm-job')).status).toBe('done');
     expect(f).not.toHaveBeenCalled();
   });
-  it('Notion 성공 후 Discord 일시 실패를 복구하고 Notion 중복 생성하지 않음', async () => {
-    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, Date.now() + 600000);
+  it('영구 연결로 이슈를 생성하고 Discord 일시 실패를 복구하며 Notion 중복 생성하지 않음', async () => {
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, 0);
     let notionCreates = 0,
       forumPosts = 0;
     fake((url, init) => {
@@ -1099,5 +1100,91 @@ describe('Worker native fetch 호환성', () => {
     await expect(
       http.request('fixture', 'https://http-fixture.test/ok', { method: 'POST', body: 'test' }),
     ).resolves.toEqual({ ok: true, method: 'POST' });
+  });
+});
+
+describe('계정 연결과 로그인 유지', () => {
+  it('영구 연결은 오래 지나도 담당자에 포함되고 직접 해제할 수 있다', async () => {
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, 0);
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, '22222', 'expired-person', 0, 1);
+    expect((await linkedMembers(e, p)).map((x) => x.discord_id)).toEqual([id]);
+    await unlink(e, p, who);
+    expect(await linkedMembers(e, p)).toEqual([]);
+  });
+  it('기존 단기 세션을 90일로 갱신하고 이후 로그인 경로도 승인을 생략한다', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO sessions VALUES(?,?,?,?,?)',
+      await hash('session'),
+      id,
+      '본인',
+      'csrf',
+      Date.now() + 60_000,
+    );
+    fake(() => member);
+    const response = await worker.fetch(
+      new Request('http://localhost/api/me', { headers: { cookie: 'session=session' } }),
+      e,
+      ctx,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('set-cookie')).toContain('Max-Age=7776000');
+    expect(response.headers.get('set-cookie')).toContain('HttpOnly');
+    expect((await one(e.DB, 'SELECT expires FROM sessions')).expires).toBeGreaterThan(
+      Date.now() + 89 * 86400_000,
+    );
+    expect(await response.text()).not.toContain('sessionCookie');
+    const again = await worker.fetch(
+      new Request('http://localhost/auth/login', { headers: { cookie: 'session=session' } }),
+      e,
+      ctx,
+    );
+    expect(again.headers.get('location')).toBe('/');
+    expect(again.headers.get('set-cookie')).toBeNull();
+    expect(await one(e.DB, 'SELECT 1 FROM oauth_states')).toBeNull();
+  });
+  it('로그아웃은 세션을 지우지만 영구 Notion 연결은 유지한다', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO sessions VALUES(?,?,?,?,?)',
+      await hash('session'),
+      id,
+      '본인',
+      'csrf',
+      Date.now() + 60_000,
+    );
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, 0);
+    fake(() => member);
+    const response = await worker.fetch(
+      new Request(e.APP_ORIGIN + '/auth/logout', {
+        method: 'POST',
+        headers: { cookie: 'session=session', origin: e.APP_ORIGIN, 'x-csrf-token': 'csrf' },
+      }),
+      e,
+      ctx,
+    );
+    expect(response.status).toBe(204);
+    expect(response.headers.get('set-cookie')).toContain('Max-Age=0');
+    expect(response.headers.get('set-cookie')).not.toContain('7776000');
+    expect(await one(e.DB, 'SELECT 1 FROM sessions')).toBeNull();
+    expect((await linkedMembers(e, p)).length).toBe(1);
+  });
+  it('만료된 세션은 자동 부활시키지 않고 새 Discord 로그인을 시작한다', async () => {
+    await run(
+      e.DB,
+      'INSERT INTO sessions VALUES(?,?,?,?,?)',
+      await hash('expired'),
+      id,
+      '본인',
+      'csrf',
+      1,
+    );
+    const response = await worker.fetch(
+      new Request('http://localhost/auth/login', { headers: { cookie: 'session=expired' } }),
+      e,
+      ctx,
+    );
+    expect(new URL(response.headers.get('location')!).hostname).toBe('discord.com');
+    expect((await one(e.DB, 'SELECT expires FROM sessions')).expires).toBe(1);
   });
 });
