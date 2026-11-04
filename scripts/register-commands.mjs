@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
-export async function registerCommands(env, fetcher = fetch) {
+export async function registerCommands(
+  env,
+  fetcher = fetch,
+  wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+) {
   for (const key of ['GUILD_ID', 'DISCORD_APPLICATION_ID'])
     if (!/^\d{17,20}$/.test(env[key] || '')) throw new Error('Invalid ' + key);
   if (!env.DISCORD_BOT_TOKEN) throw new Error('Missing bot token');
@@ -9,17 +13,27 @@ export async function registerCommands(env, fetcher = fetch) {
     await readFile(new URL('../config/discord-commands.json', import.meta.url), 'utf8'),
   );
   const api = async (path, method = 'GET', body) => {
-    const r = await fetcher('https://discord.com/api/v10' + path, {
-      method,
-      headers: {
-        Authorization: 'Bot ' + env.DISCORD_BOT_TOKEN,
-        'Content-Type': 'application/json',
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!r.ok) throw new Error('Discord HTTP ' + r.status);
-    return r.json();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const r = await fetcher('https://discord.com/api/v10' + path, {
+        method,
+        headers: {
+          Authorization: 'Bot ' + env.DISCORD_BOT_TOKEN,
+          'Content-Type': 'application/json',
+        },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (r.status === 429 && attempt < 4) {
+        const info = await r.json().catch(() => ({}));
+        const seconds = Number(info.retry_after ?? r.headers.get('retry-after') ?? 1);
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds > 60)
+          throw new Error('Discord rate limit exceeds automatic retry window');
+        await wait(Math.ceil(seconds * 1000) + 250);
+        continue;
+      }
+      if (!r.ok) throw new Error('Discord HTTP ' + r.status);
+      return r.json();
+    }
   };
   const bot = await api('/users/@me');
   if (bot.id !== env.DISCORD_APPLICATION_ID) throw new Error('Discord application mismatch');

@@ -47,3 +47,25 @@ test('invalid guild and mismatched bot stop command registration', async () => {
   await assert.rejects(registerCommands(env, fetcher), /mismatch/);
   assert.equal(calls, 1);
 });
+
+test('honors Discord retry_after before retrying a rate-limited upsert', async () => {
+  const stored = [];
+  const waits = [];
+  let limited = false;
+  const fetcher = async (url, init) => {
+    if (url.endsWith('/users/@me')) return Response.json({ id: env.DISCORD_APPLICATION_ID });
+    if (init.method === 'POST') {
+      if (!limited) {
+        limited = true;
+        return Response.json({ retry_after: 0.5 }, { status: 429 });
+      }
+      const command = { ...JSON.parse(init.body), id: 'registered' };
+      stored.push(command);
+      return Response.json(command);
+    }
+    return Response.json(stored);
+  };
+  const result = await registerCommands(env, fetcher, async (ms) => waits.push(ms));
+  assert.deepEqual(waits, [750]);
+  assert.ok(result.some((c) => c.name === '투표결과'));
+});
