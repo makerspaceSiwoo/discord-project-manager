@@ -1,7 +1,7 @@
 import { Discord, safeText } from '../adapters/discord';
 import { Http } from '../adapters/http';
 import { Notion, plain } from '../adapters/notion';
-import { issueSummary, validateDraft } from '../modules/issues';
+import { issueSummary, issueThreadName, validateDraft } from '../modules/issues';
 import { addDays, currentWeek, timing } from '../modules/scheduling';
 import { rank, reportable, reportMessage } from '../modules/reporting';
 import { all, enqueue, one, run } from './db';
@@ -149,8 +149,8 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       effect(
         db,
         id,
-        () => d.message(channel, content + '\n' + marker, users, nonce),
-        () => d.findMessage(channel, marker),
+        () => d.message(channel, content, users, nonce),
+        () => d.findMessage(channel, marker, nonce),
       );
     return thread ? d.withOpenThread(channel, send) : send();
   };
@@ -187,7 +187,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
         i = n.normalize(p, page);
       i.description = draft.description;
       const marker = `[${(await hash(requestId)).slice(0, 12)}]`;
-      const content = issueSummary(i, [draft.assignee], marker);
+      const content = issueSummary(i, [draft.assignee]);
       let thread: any, messageId: string;
       if (p.issueChannelMode === 'forum') {
         thread = await effect(
@@ -195,11 +195,11 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
           `${job.id}:thread`,
           () =>
             d.api(`/channels/${p.issueChannelId}/threads`, 'POST', {
-              name: `${marker} ${safeText(i.title)}`.slice(0, 100),
+              name: issueThreadName(i),
               auto_archive_duration: 1440,
               message: { content, allowed_mentions: { parse: [] } },
             }),
-          () => d.findForum(p, marker),
+          () => d.findForum(p, marker, i.taskId, i.url),
         );
         messageId = thread.message?.id || thread.id;
       } else {
@@ -209,7 +209,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
           `${job.id}:thread`,
           () =>
             d.api(`/channels/${p.issueChannelId}/messages/${m.id}/threads`, 'POST', {
-              name: `${marker} ${safeText(i.title)}`.slice(0, 100),
+              name: issueThreadName(i),
               auto_archive_duration: 1440,
             }),
           async () => {
@@ -285,13 +285,10 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
     const assigned = mappings.filter((m) => i.assignees.includes(m.notion_id));
     const previous: string[] = JSON.parse(link.assignees),
       newOnes = assigned.filter((m) => !previous.includes(m.notion_id));
-    const marker = `[${(await hash(link.request_id)).slice(0, 12)}]`;
+    let cleanedMessages = 0;
     await d.withOpenThread(link.thread_id, async () => {
       await d.api(`/channels/${link.thread_id}`, 'PATCH', {
-        name: `${marker} ${i.archived ? '[보관] ' : ''}${safeText(i.status)} · ${safeText(i.title)}`.slice(
-          0,
-          100,
-        ),
+        name: issueThreadName(i),
       });
       await d.edit(
         p.issueChannelMode === 'forum' ? link.thread_id : p.issueChannelId,
@@ -299,9 +296,37 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
         issueSummary(
           i,
           assigned.map((m) => m.discord_id),
-          marker,
         ),
       );
+      if (payload.refreshPresentation) {
+        // Only rewrite known bot notifications belonging to this linked issue.
+        const notices = await all(
+          db,
+          `SELECT e.id,e.result FROM effects e JOIN jobs j ON j.id=e.id
+          WHERE e.state='done' AND j.kind='assignee-notify' AND json_extract(j.payload,'$.pageId')=?
+          AND json_extract(j.payload,'$.threadId')=? ORDER BY j.created_at DESC LIMIT 4`,
+          i.id,
+          link.thread_id,
+        );
+        for (const notice of notices) {
+          const messageId = JSON.parse(notice.result).id;
+          let message: any;
+          try {
+            message = await d.api(`/channels/${link.thread_id}/messages/${messageId}`);
+          } catch (error) {
+            if (error instanceof RemoteError && error.status === 404) continue;
+            throw error;
+          }
+          const marker = `[연수리:${(await hash(notice.id)).slice(0, 18)}]`;
+          if (
+            message.author?.id !== env.DISCORD_APPLICATION_ID ||
+            !message.content?.endsWith('\n' + marker)
+          )
+            continue;
+          await d.edit(link.thread_id, messageId, message.content.slice(0, -marker.length - 1));
+          cleanedMessages++;
+        }
+      }
     });
     await db.batch([
       ...newOnes.map((m) =>
@@ -326,7 +351,9 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
         .prepare('UPDATE issue_links SET last_edited=?,assignees=? WHERE page_id=?')
         .bind(i.edited, JSON.stringify(i.assignees), i.id),
     ]);
-    return null;
+    return payload.refreshPresentation
+      ? { finished: true, presentationUpdated: true, cleanedMessages }
+      : null;
   }
   if (job.kind === 'assignee-notify') {
     const mapping = await one(

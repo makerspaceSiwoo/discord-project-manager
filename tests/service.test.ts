@@ -18,7 +18,14 @@ import config from '../config/project.example.json';
 import { aggregate, currentWeek, timing, slots, saveVote } from '../src/modules/scheduling';
 import { compareIssues, reportable, reportMessage } from '../src/modules/reporting';
 import { matchComment, beginLink, inspectLink, confirmLink, unlink } from '../src/modules/linking';
-import { validateDraft, fields, modal } from '../src/modules/issues';
+import {
+  validateDraft,
+  normalizeDueDate,
+  issueSummary,
+  issueThreadName,
+  fields,
+  modal,
+} from '../src/modules/issues';
 import { hash, discordSignature, notionSignature } from '../src/core/crypto';
 import { all, one, run, enqueue } from '../src/core/db';
 import { effect } from '../src/core/effects';
@@ -1315,4 +1322,138 @@ describe('이메일 계정 연결', () => {
     await expect(requestEmailLink(e, p, who, 'me@example.com')).rejects.toThrow('1분');
     expect(await one(e.DB, 'SELECT 1 FROM links')).toBeNull();
   });
+});
+
+describe('날짜 입력과 이슈 표시', () => {
+  it('숫자 날짜를 정규화하고 윤년과 월말을 엄격히 검증한다', () => {
+    for (const [input, expected] of [
+      ['20261106', '2026-11-06'],
+      ['2026-11-06', '2026-11-06'],
+      ['20000229', '2000-02-29'],
+      ['20240229', '2024-02-29'],
+      [' 20261106 ', '2026-11-06'],
+    ]) {
+      expect(normalizeDueDate(input)).toBe(expected);
+      expect(validateDraft({ ...draft, due: input }, p).due).toBe(expected);
+    }
+    for (const input of [
+      '20260229',
+      '19000229',
+      '21000229',
+      '2026-02-30',
+      '20260431',
+      '20261301',
+      '20260001',
+      '20261100',
+      '00000101',
+      '2026116',
+      '202611060',
+      '2026/11/06',
+      '2026-1-06',
+      '2026-11-06T00:00:00Z',
+      '２０２６１１０６',
+      '2026--11-06',
+      '',
+      null,
+      20261106,
+    ]) {
+      expect(() => normalizeDueDate(input)).toThrow();
+    }
+  });
+  it('각 필드를 세로로 표시하고 상태를 강조하며 내부 식별자는 표시하지 않는다', () => {
+    const i = new Notion(e).normalize(p, page());
+    i.status = '진행 중';
+    const content = issueSummary(i, [id]);
+    expect(content).toContain(
+      '> **상태 : 🟦 진행 중**\n유형 : 기능\n마감일 : 2026-11-09\n우선순위 : 높음\n담당자 : <@11111>',
+    );
+    expect(content).not.toMatch(/\[(?:연수리:)?[a-f0-9]{12,24}\]/);
+    expect(issueThreadName(i)).toBe('TASK-1 · 🟦 진행 중 · 업무');
+    expect(issueSummary({ ...i, status: '완료' }, [])).toContain('✅ 완료');
+    expect(issueSummary({ ...i, archived: true }, [])).toContain('📦 보관/휴지통');
+  });
+  it('nonce로 복구하고 이전 메시지의 마커도 읽되 타인의 메시지는 무시한다', async () => {
+    fake(() => [
+      { id: 'wrong', author: { id: 'someone' }, nonce: 'n' },
+      { id: 'right', author: { id: e.DISCORD_APPLICATION_ID }, nonce: 'n', content: '알림' },
+    ]);
+    expect((await new Discord(e).findMessage('channel', '[old]', 'n')).id).toBe('right');
+    fake(() => [{ id: 'old', author: { id: e.DISCORD_APPLICATION_ID }, content: '알림\n[old]' }]);
+    expect((await new Discord(e).findMessage('channel', '[old]', 'n')).id).toBe('old');
+    fake(() => []);
+    expect(await new Discord(e).findMessage('channel', '[old]', 'n')).toBeNull();
+  });
+  it('포럼은 업무 ID와 원문 URL로 복구하고 다른 페이지는 연결하지 않는다', async () => {
+    fake((url) => {
+      if (url.pathname.endsWith('/threads/active'))
+        return {
+          threads: [{ id: 't', parent_id: p.issueChannelId, name: 'TASK-1 · 🟦 진행 중 · 업무' }],
+        };
+      if (url.pathname.includes('/threads/archived')) return { threads: [] };
+      return {
+        author: { id: e.DISCORD_APPLICATION_ID },
+        content: '<https://www.notion.so/page-1>',
+      };
+    });
+    expect(
+      (await new Discord(e).findForum(p, '[old]', 'TASK-1', 'https://www.notion.so/page-1')).id,
+    ).toBe('t');
+    expect(
+      await new Discord(e).findForum(p, '[old]', 'TASK-1', 'https://www.notion.so/page-2'),
+    ).toBeNull();
+  });
+});
+
+it('기존 요약과 알려진 봇 알림의 내부 마커만 제거하고 재멘션하지 않는다', async () => {
+  const noticeId = 'notice';
+  const marker = `[연수리:${(await hash(noticeId)).slice(0, 18)}]`;
+  await run(
+    e.DB,
+    'INSERT INTO issue_links(page_id,project_id,request_id,thread_id,message_id,assignees) VALUES(?,?,?,?,?,?)',
+    'page-1',
+    p.id,
+    'req',
+    'thread',
+    'starter',
+    JSON.stringify([nid]),
+  );
+  await enqueue(e.DB, noticeId, 'assignee-notify', { pageId: 'page-1', threadId: 'thread' });
+  await run(e.DB, "UPDATE jobs SET status='done' WHERE id=?", noticeId);
+  await run(
+    e.DB,
+    'INSERT INTO effects(id,state,result,updated_at) VALUES(?,?,?,?)',
+    noticeId,
+    'done',
+    JSON.stringify({ id: 'notice-message' }),
+    0,
+  );
+  const edits: any[] = [];
+  fake((url, init) => {
+    if (url.pathname.endsWith('/pages/page-1')) {
+      const result = page();
+      result.properties[p.notion.properties.status] = { status: { name: '진행 중' } };
+      return result;
+    }
+    if (url.pathname.includes('/children')) return { results: [] };
+    if (url.pathname.endsWith('/messages/notice-message') && init.method !== 'PATCH')
+      return {
+        author: { id: e.DISCORD_APPLICATION_ID },
+        content: '새 담당자: <@11111>\n' + marker,
+      };
+    if (init.method === 'PATCH') edits.push({ path: url.pathname, ...JSON.parse(init.body) });
+    return { id: 'ok' };
+  });
+  await enqueue(e.DB, 'refresh', 'issue-sync', { pageId: 'page-1', refreshPresentation: true });
+  const result = await jobStep('refresh');
+  expect(result.status).toBe('done');
+  expect(JSON.parse(result.state).cleanedMessages).toBe(1);
+  expect(edits.find((x) => x.path.endsWith('/messages/notice-message')).content).toBe(
+    '새 담당자: <@11111>',
+  );
+  expect(edits.find((x) => x.path.endsWith('/messages/starter')).content).toContain('🟦 진행 중');
+  for (const edit of edits.filter((x) => x.content))
+    expect(edit.allowed_mentions).toEqual({ parse: [] });
+  expect(
+    await one(e.DB, "SELECT 1 FROM jobs WHERE status='pending' AND kind='assignee-notify'"),
+  ).toBeNull();
 });
