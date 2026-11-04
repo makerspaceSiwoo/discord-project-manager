@@ -1,0 +1,39 @@
+name: Inspect integrations
+on:
+  workflow_dispatch:
+    inputs:
+      guild_id:
+        description: Discord server ID
+        required: true
+        type: string
+      notion_page_id:
+        description: Notion root page ID
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner && github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: node scripts/inspect-integrations.mjs
+        env:
+          GUILD_ID: ${{ inputs.guild_id }}
+          NOTION_PAGE_ID: ${{ inputs.notion_page_id }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          INSPECTION_PUBLIC_KEY: ${{ vars.INSPECTION_PUBLIC_KEY }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: integration-inspection
+          path: work/inspection/report.encrypted.json
+          retention-days: 1
+          if-no-files-found: error
