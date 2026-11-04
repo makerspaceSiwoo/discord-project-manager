@@ -4,7 +4,7 @@
 
 ## 0. 설치 구조와 로컬 준비
 
-코드는 Cloudflare Workers에서 실행하고, Discord 앱에 Worker의 `/interactions` 주소를 연결합니다. D1은 설정·계정 연결·투표·작업 큐를 저장합니다. 배포 후에는 개인 컴퓨터를 계속 켜둘 필요가 없습니다. GitHub에 push하는 것만으로는 배포되거나 봇이 연결되지 않습니다.
+코드는 Cloudflare Workers에서 실행하고, Discord 앱에 Worker의 `/interactions` 주소를 연결합니다. D1은 설정·계정 연결·투표·작업 큐를 저장합니다. 배포 후에는 개인 컴퓨터를 계속 켜둘 필요가 없습니다. [GitHub Actions 설정](github-actions.md)을 완료하면 main push로 배포됩니다. Discord 연결과 프로젝트 활성화는 별도 설정입니다.
 
 Node.js 22 이상을 설치한 뒤 저장소 폴더에서 실행합니다.
 
@@ -100,6 +100,8 @@ node --env-file=.dev.vars scripts/notion-schema.mjs config/project.local.json
 
 ## 4. Cloudflare Free 배포
 
+GitHub에서 값을 입력하고 자동 배포하려면 [Actions 전용 안내](github-actions.md)를 따릅니다. 아래는 로컬 CLI로 수동 배포하는 대안입니다. 두 방식으로 동시에 배포할 필요는 없습니다.
+
 먼저 대시보드의 Workers 계정 플랜이 **Free**인지 확인합니다. 이 구성은 업그레이드, 결제 수단 등록, 도메인 구매를 수행하지 않습니다.
 
 ```sh
@@ -171,4 +173,4 @@ node scripts/config.mjs config/project.local.json --validate
 node scripts/config.mjs config/project.local.json --remote
 ```
 
-코드를 수정한 경우에는 `npm run check`, `npm test`, `npm run build` 확인 후 `npm run deploy`를 실행합니다. GitHub push와 Worker 배포는 별도 작업입니다.
+코드를 수정한 경우에는 `npm run check`, `npm test`, `npm run build` 확인 후 `npm run deploy`를 실행합니다. Actions를 설정한 경우 main push가 검증·마이그레이션·배포를 실행합니다. feature 브랜치와 PR에서는 검증만 실행합니다.

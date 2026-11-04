@@ -13,7 +13,9 @@
     "setup": "node scripts/setup.mjs",
     "deploy": "wrangler deploy",
     "build": "wrangler deploy --dry-run --outdir dist",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "test:deploy": "node --test tests/deployment.test.mjs",
+    "ci:prepare": "node scripts/prepare-deploy.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "1.5.0",

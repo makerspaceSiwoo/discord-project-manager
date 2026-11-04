@@ -9,3 +9,8 @@ coverage/
 work/
 config/project.local.json
 *.sqlite*
+
+# Generated production config; runtime secrets are under ignored work/
+.wrangler.deploy.json
+.dev.vars.*
+!.dev.vars.example

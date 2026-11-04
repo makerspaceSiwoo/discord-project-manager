@@ -28,7 +28,7 @@ node scripts/config.mjs config/project.local.json --local
 npm run build
 ```
 
-`npm run build`는 **배포하지 않고** Worker 번들과 정적 자산 구성을 검사합니다. 모든 개발 의존성은 버전과 lockfile로 고정되어 있습니다. 비밀값은 `.dev.vars`, Wrangler secrets에만 두고 Git에 넣지 않습니다.
+`npm run build`는 **배포하지 않고** Worker 번들과 정적 자산 구성을 검사합니다. 모든 개발 의존성은 버전과 lockfile로 고정되어 있습니다. 비밀값은 로컬 `.dev.vars` 또는 GitHub Actions Secrets·Cloudflare Worker Secrets에 두고 Git에 넣지 않습니다.
 
 ## 포함 기능
 
@@ -44,6 +44,7 @@ npm run build
 
 - [최초 확인 내용과 설계](docs/architecture.md)
 - [Discord·Notion 설정 및 Cloudflare 배포](docs/setup.md)
+- [GitHub Actions 자동 배포 — 입력할 Secrets/Variables](docs/github-actions.md)
 - [게스트 계정 연결 실환경 검증](docs/guest-verification.md)
 - [무료 한도 근거와 운영 예산](docs/free-tier.md)
 - [장애·중복·할당량 복구](docs/recovery.md)
