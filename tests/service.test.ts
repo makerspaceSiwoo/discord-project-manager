@@ -1,3 +1,4 @@
+import { requestAutomation, upcomingWeek, reportWeek } from '../src/modules/automation';
 import { startManualTest } from '../src/modules/manual-tests';
 import { scheduleIssueSync } from '../src/modules/issue-sync';
 import {
@@ -152,11 +153,12 @@ describe('주차와 투표', () => {
     expect(currentWeek(Date.parse('2026-11-09T00:00:00+09:00'))).toBe('2026-11-09');
     expect(currentWeek(Date.parse('2026-12-31T00:00:00+09:00'))).toBe('2026-12-28');
   });
-  it('일요일 9시, 23시, 월요일 0시와 9시 경계', () => {
+  it('일요일 9시 개시, 22:59:59 알림, 23:59:59 마감, 월요일 9시 보고 경계', () => {
     const t = timing('2026-11-09', p);
     expect(new Date(t.opens).toISOString()).toBe('2026-11-08T00:00:00.000Z');
     expect(t.closes - t.reminder).toBe(3600_000);
-    expect(t.report - t.closes).toBe(9 * 3600_000);
+    expect(t.report - t.closes).toBe(9 * 3600_000 + 1000);
+    expect(new Date(t.closes).toISOString()).toBe('2026-11-08T14:59:59.000Z');
   });
   it('196개 슬롯과 마지막 일요일 22:30 구간, 범위 검증', () => {
     expect(slots([195, 0, 0])).toEqual([0, 195]);
@@ -1689,4 +1691,152 @@ it('기존 테스트 보고를 새 게시나 멘션 없이 Embed로 수정한다
   expect(edits[0].content).not.toContain('@everyone');
   expect(edits[0].allowed_mentions).toEqual({ parse: [] });
   expect(edits[0].embeds).toHaveLength(1);
+});
+
+describe('Cron과 직접 명령의 공통 주차 작업', () => {
+  it('일요일에도 보고는 이번 주, 투표는 다음 주를 대상으로 한다', () => {
+    for (const date of ['2026-11-04T12:00:00+09:00', '2026-11-08T12:00:00+09:00']) {
+      expect(upcomingWeek(Date.parse(date), p)).toBe('2026-11-09');
+      expect(reportWeek(Date.parse(date), p)).toBe('2026-11-02');
+    }
+  });
+  it('반복 호출과 Cron은 같은 투표·보고 작업을 공유한다', async () => {
+    const at = Date.parse('2026-11-08T10:00:00+09:00');
+    const first = await requestAutomation(e, p, '일정투표', at);
+    expect(await requestAutomation(e, p, '일정투표', at)).toEqual(first);
+    await schedule(e, p, at);
+    expect((await all(e.DB, 'SELECT id FROM jobs')).map((j) => j.id)).toEqual([
+      `${p.id}:2026-11-09:open`,
+    ]);
+    await requestAutomation(e, p, '주간보고', at);
+    await requestAutomation(e, p, '주간보고', at);
+    await schedule(e, p, Date.parse('2026-11-09T10:00:00+09:00'));
+    expect(
+      await all(e.DB, 'SELECT id FROM jobs WHERE id=?', `${p.id}:2026-11-02:report`),
+    ).toHaveLength(1);
+    expect(
+      await all(e.DB, 'SELECT id FROM jobs WHERE id=?', `${p.id}:2026-11-09:open`),
+    ).toHaveLength(1);
+  });
+  it('수동 개시는 일요일 전에도 응답 가능하며 정기 자동화를 끈 상태에서도 동작한다', async () => {
+    p.features = { issues: false, automation: false };
+    fake((url) => (url.pathname.endsWith('/members') ? [member] : { id: 'created' }));
+    const result = await requestAutomation(e, p, '일정투표');
+    const jobId = result.jobId!;
+    expect((await jobStep(jobId)).status).toBe('pending');
+    expect((await jobStep(jobId)).status).toBe('done');
+    const poll = await one(e.DB, 'SELECT * FROM polls');
+    expect(poll.opens).toBeLessThanOrEqual(Date.now());
+    expect(poll.closes).toBeGreaterThan(Date.now());
+    const posted = await one(e.DB, 'SELECT result FROM effects WHERE id=?', jobId + ':notice');
+    expect(posted).toBeTruthy();
+    const repeated = await requestAutomation(e, p, '일정투표');
+    expect(repeated.status).toBe('done');
+  });
+  it('결과 명령은 테스트 투표를 제외하고 진행 중 투표를 마감하지 않는다', async () => {
+    await seedPoll();
+    await run(e.DB, "UPDATE polls SET thread_id='thread'");
+    const pending = await requestAutomation(e, p, '투표결과');
+    expect(pending.content).toContain('현재 집계');
+    expect(await one(e.DB, 'SELECT 1 FROM jobs')).toBeNull();
+    await run(e.DB, 'UPDATE polls SET closes=0');
+    const closed = await requestAutomation(e, p, '투표결과');
+    expect(closed.jobId).toBe(`${p.id}:2026-11-09:close`);
+    await run(e.DB, 'UPDATE polls SET display_week=week');
+    expect((await requestAutomation(e, p, '투표결과')).content).toContain(
+      '정식 일정 투표가 없습니다',
+    );
+  });
+  it('비활성 프로젝트와 실패한 작업은 명령으로 무단 재시작하지 않는다', async () => {
+    p.enabled = false;
+    await expect(requestAutomation(e, p, '주간보고')).rejects.toThrow('비활성');
+    p.enabled = true;
+    const first = await requestAutomation(e, p, '주간보고');
+    await run(e.DB, "UPDATE jobs SET status='review',error='uncertain'");
+    const second = await requestAutomation(e, p, '주간보고');
+    expect(second.jobId).toBe(first.jobId);
+    expect(second.status).toBe('review');
+  });
+});
+
+it('새 명령은 이슈 기능과 독립적으로 비공개 지연 응답하며 다른 서버는 거부한다', async () => {
+  p.features = { issues: false, automation: false };
+  await run(e.DB, 'UPDATE projects SET config=?', JSON.stringify(p));
+  const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
+  const hex = (a: ArrayBuffer) =>
+    Array.from(new Uint8Array(a), (v) => v.toString(16).padStart(2, '0')).join('');
+  const customEnv = {
+    ...e,
+    DISCORD_PUBLIC_KEY: hex(await crypto.subtle.exportKey('raw', keys.publicKey)),
+  };
+  const notices: any[] = [];
+  fake((url, init) => {
+    if (url.pathname.endsWith('/members')) return [member];
+    if (url.pathname.endsWith('/query')) return { results: [], has_more: false };
+    if (url.pathname.endsWith('/messages/@original')) notices.push(JSON.parse(init.body));
+    return { id: 'message-or-thread' };
+  });
+  for (const guild of [p.guildId, 'another-server'])
+    for (const command of ['주간보고', '일정투표', '투표결과']) {
+      const body = JSON.stringify({
+        id: 'command',
+        type: 2,
+        token: 'ephemeral-token',
+        guild_id: guild,
+        member,
+        data: { name: command },
+      });
+      const ts = String(Math.floor(Date.now() / 1000));
+      const signature = hex(
+        await crypto.subtle.sign('Ed25519', keys.privateKey, new TextEncoder().encode(ts + body)),
+      );
+      const tasks: Promise<any>[] = [];
+      const response: any = await (
+        await worker.fetch(
+          new Request(e.APP_ORIGIN + '/interactions', {
+            method: 'POST',
+            body,
+            headers: { 'x-signature-ed25519': signature, 'x-signature-timestamp': ts },
+          }),
+          customEnv,
+          { ...ctx, waitUntil: (t: Promise<any>) => tasks.push(t) } as any,
+        )
+      ).json();
+      expect(response.data.flags).toBe(64);
+      expect(response.type).toBe(guild === p.guildId ? 5 : 4);
+      if (guild !== p.guildId) expect(tasks).toHaveLength(0);
+      await Promise.all(tasks);
+    }
+  expect(notices).toHaveLength(3);
+  for (const notice of notices) expect(notice.allowed_mentions).toEqual({ parse: [] });
+  expect((await all(e.DB, 'SELECT id FROM jobs')).length).toBe(2);
+});
+
+it('마감 후 수동 결과는 월요일 보고 전에도 게시하며 Cron은 다시 보내지 않는다', async () => {
+  const week = '2026-11-09';
+  const deadline = timing(week, p).closes;
+  vi.spyOn(Date, 'now').mockReturnValue(deadline + 500);
+  const pollId = `${p.id}:${week}`;
+  await run(
+    e.DB,
+    'INSERT INTO polls(id,project_id,week,opens,closes,members,thread_id) VALUES(?,?,?,?,?,?,?)',
+    pollId,
+    p.id,
+    week,
+    0,
+    deadline,
+    '[]',
+    'thread',
+  );
+  let sends = 0;
+  fake((url, init) => {
+    if (init.method === 'POST') sends++;
+    return { id: 'result' };
+  });
+  const request = await requestAutomation(e, p, '투표결과');
+  expect((await jobStep(request.jobId!)).status).toBe('done');
+  await requestAutomation(e, p, '투표결과');
+  await schedule(e, p, timing(week, p).report);
+  expect((await jobStep(request.jobId!)).status).toBe('done');
+  expect(sends).toBe(1);
 });

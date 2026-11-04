@@ -26,5 +26,20 @@
     "description": "관리자 연동 진단 및 복구",
     "type": 1,
     "default_member_permissions": "8"
+  },
+  {
+    "name": "주간보고",
+    "description": "이번 주 미완료 작업 보고 발송 또는 기존 보고 확인",
+    "type": 1
+  },
+  {
+    "name": "일정투표",
+    "description": "다음 주 일정 투표 열기 또는 기존 투표 확인",
+    "type": 1
+  },
+  {
+    "name": "투표결과",
+    "description": "진행 중 집계 확인 또는 마감된 투표 결과 게시",
+    "type": 1
   }
 ]

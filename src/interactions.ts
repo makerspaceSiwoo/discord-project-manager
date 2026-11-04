@@ -1,3 +1,4 @@
+import { automationCommands, requestAutomation } from './modules/automation';
 import { Discord } from './adapters/discord';
 import { projectMember, projectAdmin, issuesEnabled } from './core/access';
 import { linkedMembers } from './core/auth';
@@ -36,6 +37,10 @@ export async function interactions(req: Request, env: Env, p: Project, ctx: Exec
     if (!projectAdmin(p, userId, i.member.roles || [], i.member.permissions || '0'))
       return ephemeral('관리자 전용 명령입니다.');
     return ephemeral(`설정 및 연동 진단: ${env.APP_ORIGIN}/?view=admin`);
+  }
+  if (i.type === 2 && automationCommands.includes(command)) {
+    ctx.waitUntil(processAutomationCommand(env, p, command, i.token));
+    return json({ type: 5, data: { flags: 64 } });
   }
   if (!issuesEnabled(p)) return ephemeral('이슈 생성이 비활성 상태입니다.');
   try {
@@ -195,5 +200,44 @@ async function processConfirmedIssue(env: Env, p: Project, jobId: string, token:
     } catch {
       /* The persisted job is still available through the authenticated status page. */
     }
+  }
+}
+
+async function processAutomationCommand(env: Env, p: Project, command: string, token: string) {
+  let content: string;
+  try {
+    const result = await requestAutomation(env, p, command);
+    if ('jobId' in result && result.jobId) {
+      // Bounded immediate progress; Cron continues paginated work and retries.
+      for (let step = 0; step < 3; step++) {
+        const before = await one(
+          env.DB,
+          'SELECT status,state,next_at FROM jobs WHERE id=?',
+          result.jobId,
+        );
+        if (before?.status !== 'pending' || before.next_at > Date.now()) break;
+        await processOne(env, p, result.jobId);
+        const after = await one(env.DB, 'SELECT status,state FROM jobs WHERE id=?', result.jobId);
+        if (after?.status !== 'pending' || after.state === before.state) break;
+      }
+      const job = await one(env.DB, 'SELECT status,error FROM jobs WHERE id=?', result.jobId);
+      const status =
+        job?.status === 'done'
+          ? '게시된 메시지를 확인해 주세요. 같은 주차는 중복 발송하지 않습니다.'
+          : ['failed', 'review'].includes(job?.status)
+            ? '처리가 중단되었습니다. 관리자에게 연동 상태 확인을 요청해 주세요.'
+            : '요청을 접수했습니다. 예약 작업이 이어서 처리합니다.';
+      content = status + '\n' + result.content;
+    } else content = result.content;
+  } catch (error) {
+    content =
+      error instanceof AppError
+        ? error.message
+        : '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.';
+  }
+  try {
+    await new Discord(env).followup(token, { content, allowed_mentions: { parse: [] } });
+  } catch {
+    /* The durable job remains available; never recreate it for a reply failure. */
   }
 }

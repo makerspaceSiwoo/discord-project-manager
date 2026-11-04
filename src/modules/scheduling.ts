@@ -40,10 +40,11 @@ export function currentWeek(at: number, zone = 'Asia/Seoul') {
 }
 export function timing(week: string, p: Project) {
   const sun = addDays(week, -1);
+  const closes = localInstant(week, '00:00', p.timezone) - 1000;
   return {
     opens: localInstant(sun, p.schedule.open, p.timezone),
-    reminder: localInstant(sun, p.schedule.reminder, p.timezone),
-    closes: localInstant(week, '00:00', p.timezone),
+    reminder: closes - 3600_000,
+    closes,
     report: localInstant(week, p.schedule.report, p.timezone),
   };
 }

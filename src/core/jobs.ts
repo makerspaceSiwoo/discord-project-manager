@@ -54,7 +54,16 @@ export async function schedule(env: Env, p: Project, at = Date.now()) {
 }
 export async function processOne(env: Env, p: Project, preferred?: string) {
   const allowedKinds = [
-    ...(p.enabled ? ['test-poll-open', 'test-poll-close', 'test-report'] : []),
+    ...(p.enabled
+      ? [
+          'test-poll-open',
+          'test-poll-close',
+          'test-report',
+          'manual-poll-open',
+          'manual-poll-close',
+          'manual-report',
+        ]
+      : []),
     ...(issuesEnabled(p) ? ['issue-create', 'issue-sync', 'assignee-notify'] : []),
     ...(automationEnabled(p) ? ['poll-open', 'poll-remind', 'poll-close', 'report', 'dm'] : []),
   ];
@@ -133,7 +142,8 @@ export async function processOne(env: Env, p: Project, preferred?: string) {
 }
 async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
   const testRun = job.kind.startsWith('test-');
-  const kind = testRun ? job.kind.slice(5) : job.kind;
+  const manualRun = job.kind.startsWith('manual-');
+  const kind = testRun ? job.kind.slice(5) : manualRun ? job.kind.slice(7) : job.kind;
   const payload = JSON.parse(job.payload),
     s = JSON.parse(job.state),
     http = new Http(),
@@ -275,13 +285,15 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
         pollId,
         p.id,
         storedWeek,
-        testRun ? 0 : t!.opens,
+        testRun ? 0 : manualRun ? Math.min(Date.now(), t!.opens) : t!.opens,
         testRun ? 0 : t!.closes,
         JSON.stringify(members),
         testRun ? week : null,
       );
       return { ...s, rosterDone: true };
     }
+    if (manualRun)
+      await run(db, 'UPDATE polls SET opens=MIN(opens,?) WHERE id=?', Date.now(), pollId);
     if (testRun) {
       const opens = Date.now();
       await run(
@@ -298,7 +310,10 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       p.schedulingChannelId,
       testRun
         ? `[테스트] **${week} ~ ${addDays(week, 6)} 일정 투표**\n${payload.durationMinutes}분 테스트 · 마감 ${new Date(poll.closes).toLocaleString('ko-KR', { timeZone: p.timezone })}\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}`
-        : `🗓️ **${week} 주간 일정 투표**\n월~일 09:00~23:00 · 30분 단위\n일요일 자정 전까지 저장하세요.\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}\n대상 ${JSON.parse(poll.members).length}명`,
+        : `@everyone\n**${week} ~ ${addDays(week, 6)} 주간 회의 일정 투표**\n마감 ${addDays(week, -1)} 23:59:59\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}`,
+      [],
+      false,
+      { mentionEveryone: !testRun },
     );
     const thread = await effect(
       db,
@@ -363,14 +378,14 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
   }
   if (kind === 'poll-close') {
     // Also defer jobs queued by older deployments until the result publication time.
-    if (!testRun && Date.now() < t!.report)
+    if (!testRun && !manualRun && Date.now() < t!.report)
       throw new RemoteError(
         'poll-result-not-ready',
         429,
         Math.ceil((t!.report - Date.now()) / 1000),
       );
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', pollId);
-    if (testRun && poll && Date.now() < poll.closes)
+    if (poll && Date.now() < poll.closes)
       throw new RemoteError(
         'poll-result-not-ready',
         429,
