@@ -54,6 +54,7 @@ export async function schedule(env: Env, p: Project, at = Date.now()) {
 }
 export async function processOne(env: Env, p: Project, preferred?: string) {
   const allowedKinds = [
+    ...(p.enabled ? ['test-poll-open', 'test-poll-close', 'test-report'] : []),
     ...(issuesEnabled(p) ? ['issue-create', 'issue-sync', 'assignee-notify'] : []),
     ...(automationEnabled(p) ? ['poll-open', 'poll-remind', 'poll-close', 'report', 'dm'] : []),
   ];
@@ -131,6 +132,8 @@ export async function processOne(env: Env, p: Project, preferred?: string) {
   }
 }
 async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
+  const testRun = job.kind.startsWith('test-');
+  const kind = testRun ? job.kind.slice(5) : job.kind;
   const payload = JSON.parse(job.payload),
     s = JSON.parse(job.state),
     http = new Http(),
@@ -155,7 +158,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       );
     return thread ? d.withOpenThread(channel, send) : send();
   };
-  if (job.kind === 'issue-create') {
+  if (kind === 'issue-create') {
     const draft = validateDraft(payload.draft, p),
       requestId = job.id;
     if (!s.pageId) {
@@ -243,14 +246,15 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
     await enqueue(db, `${job.id}:initial-sync`, 'issue-sync', { pageId: s.pageId });
     return null;
   }
-  if (job.kind === 'issue-sync') return syncIssue(env, p, n, d, payload);
+  if (kind === 'issue-sync') return syncIssue(env, p, n, d, payload);
   // Drain old queued notifications without creating new activity messages.
-  if (job.kind === 'assignee-notify') return null;
+  if (kind === 'assignee-notify') return null;
   const week = payload.week,
-    pollId = `${p.id}:${week}`,
+    pollId = testRun ? `test:${p.id}:${payload.testId}` : `${p.id}:${week}`,
+    storedWeek = testRun ? `${week}#test:${payload.testId}` : week,
     t = week ? timing(week, p) : null;
-  if (job.kind === 'poll-open') {
-    if (Date.now() >= t!.closes)
+  if (kind === 'poll-open') {
+    if (!testRun && Date.now() >= t!.closes)
       throw new AppError(
         409,
         '투표 개시를 마감 전에 실행하지 못했습니다. 과거 대상 명단을 추정해 생성하지 않습니다.',
@@ -266,28 +270,41 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       if (r.after) return { ...s, members, after: r.after };
       await run(
         db,
-        'INSERT OR IGNORE INTO polls(id,project_id,week,opens,closes,members) VALUES(?,?,?,?,?,?)',
+        'INSERT OR IGNORE INTO polls(id,project_id,week,opens,closes,members,display_week) VALUES(?,?,?,?,?,?,?)',
         pollId,
         p.id,
-        week,
-        t!.opens,
-        t!.closes,
+        storedWeek,
+        testRun ? 0 : t!.opens,
+        testRun ? 0 : t!.closes,
         JSON.stringify(members),
+        testRun ? week : null,
       );
       return { ...s, rosterDone: true };
+    }
+    if (testRun) {
+      const opens = Date.now();
+      await run(
+        db,
+        'UPDATE polls SET opens=?,closes=? WHERE id=? AND opens=0',
+        opens,
+        opens + payload.durationMinutes * 60_000,
+        pollId,
+      );
     }
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', pollId);
     const message = await sent(
       `${job.id}:notice`,
       p.schedulingChannelId,
-      `🗓️ **${week} 주간 일정 투표**\n월~일 09:00~23:00 · 30분 단위\n일요일 자정 전까지 저장하세요.\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}\n대상 ${JSON.parse(poll.members).length}명`,
+      testRun
+        ? `[테스트] **${week} ~ ${addDays(week, 6)} 일정 투표**\n${payload.durationMinutes}분 테스트 · 마감 ${new Date(poll.closes).toLocaleString('ko-KR', { timeZone: p.timezone })}\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}`
+        : `🗓️ **${week} 주간 일정 투표**\n월~일 09:00~23:00 · 30분 단위\n일요일 자정 전까지 저장하세요.\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}\n대상 ${JSON.parse(poll.members).length}명`,
     );
     const thread = await effect(
       db,
       `${job.id}:thread`,
       () =>
         d.api(`/channels/${p.schedulingChannelId}/messages/${message.id}/threads`, 'POST', {
-          name: `${week} 일정 이야기`,
+          name: `${testRun ? '[테스트] ' : ''}${week} 일정 이야기`,
           auto_archive_duration: 1440,
         }),
       async () => {
@@ -306,9 +323,10 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       thread.id,
       pollId,
     );
+    if (testRun) await enqueue(db, `${pollId}:close`, 'test-poll-close', payload, poll.closes);
     return null;
   }
-  if (job.kind === 'poll-remind') {
+  if (kind === 'poll-remind') {
     if (Date.now() >= t!.closes) return null;
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', pollId);
     if (!poll) throw new RemoteError('poll-not-ready', 503, 60);
@@ -316,7 +334,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       await enqueue(db, `${job.id}:${m.id}`, 'dm', { pollId, userId: m.id });
     return null;
   }
-  if (job.kind === 'dm') {
+  if (kind === 'dm') {
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', payload.pollId);
     if (
       !poll ||
@@ -342,33 +360,40 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
     }
     return null;
   }
-  if (job.kind === 'poll-close') {
+  if (kind === 'poll-close') {
     // Also defer jobs queued by older deployments until the result publication time.
-    if (Date.now() < t!.report)
+    if (!testRun && Date.now() < t!.report)
       throw new RemoteError(
         'poll-result-not-ready',
         429,
         Math.ceil((t!.report - Date.now()) / 1000),
       );
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', pollId);
+    if (testRun && poll && Date.now() < poll.closes)
+      throw new RemoteError(
+        'poll-result-not-ready',
+        429,
+        Math.ceil((poll.closes - Date.now()) / 1000),
+      );
     if (!poll?.thread_id)
       throw new AppError(409, '원래 투표 스레드가 없습니다. 개시 작업을 복구하세요.');
     await sent(
       job.id,
       poll.thread_id,
-      `✅ ${week} 투표가 마감되었습니다. 확정 결과: ${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}&tab=team`,
+      `${testRun ? '[테스트] ' : ''}✅ ${week} 투표가 마감되었습니다. 확정 결과: ${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}&tab=team`,
       [],
       true,
     );
     return null;
   }
-  if (job.kind === 'report') {
+  if (kind === 'report') {
     await run(
       db,
-      'INSERT OR IGNORE INTO report_runs(id,project_id,week) VALUES(?,?,?)',
+      'INSERT OR IGNORE INTO report_runs(id,project_id,week,display_week) VALUES(?,?,?,?)',
       job.id,
       p.id,
-      week,
+      storedWeek,
+      testRun ? week : null,
     );
     if (!s.collected) {
       const page = await n.query(p, s.cursor);
@@ -393,7 +418,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       job.id,
       s.offset || 0,
     );
-    const full = `전체 표: ${env.APP_ORIGIN}/?report=${encodeURIComponent(job.id)}`;
+    const full = `${testRun ? '[테스트] ' : ''}전체 표: ${env.APP_ORIGIN}/?report=${encodeURIComponent(job.id)}`;
     if (rows.length) {
       const i = JSON.parse(rows[0].payload),
         link = await one(db, 'SELECT thread_id FROM issue_links WHERE page_id=?', i.id);
@@ -407,10 +432,19 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       i.names = i.assignees.map(
         (id: string) => mappings.find((m) => m.notion_id === id)?.discord_id || `Notion:${id}`,
       );
-      await sent(`${job.id}:row:${s.offset || 0}`, p.reportChannelId, reportMessage([i], full));
+      await sent(
+        `${job.id}:row:${s.offset || 0}`,
+        p.reportChannelId,
+        (testRun ? '[테스트]\n' : '') + reportMessage([i], full),
+      );
       return { ...s, offset: (s.offset || 0) + 1 };
     }
-    if (!s.offset) await sent(`${job.id}:empty`, p.reportChannelId, reportMessage([], full));
+    if (!s.offset)
+      await sent(
+        `${job.id}:empty`,
+        p.reportChannelId,
+        (testRun ? '[테스트]\n' : '') + reportMessage([], full),
+      );
     await run(db, 'UPDATE report_runs SET complete=1 WHERE id=?', job.id);
     return null;
   }

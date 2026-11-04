@@ -1,3 +1,4 @@
+import { startManualTest } from '../src/modules/manual-tests';
 import { scheduleIssueSync } from '../src/modules/issue-sync';
 import {
   requestEmailLink,
@@ -1527,4 +1528,68 @@ it('주간 자동화가 꺼져도 연결된 이슈를 순환 조회하고 폴링
   p.features.issues = false;
   await scheduleIssueSync(e, p, 123000);
   expect((await all(e.DB, "SELECT * FROM jobs WHERE status='pending'")).length).toBe(1);
+});
+
+it('관리자 테스트만 정기 자동화 비활성 상태에서 투표와 보고를 실행한다', async () => {
+  p.features = { issues: true, automation: false };
+  await expect(startManualTest(e, p, who)).rejects.toThrow();
+  const result = await startManualTest(e, p, { ...who, admin: true }, 5);
+  const requests: any[] = [];
+  fake((url, init) => {
+    if (url.pathname.includes('/members?')) return [member];
+    if (url.pathname.endsWith('/members')) return [member];
+    if (url.pathname.includes('/members')) return [member];
+    if (url.pathname.endsWith('/query')) {
+      const done = page({ id: 'done' });
+      done.properties[p.notion.properties.status] = { status: { name: '완료' } };
+      const stopped = page({ id: 'stop' });
+      stopped.properties[p.notion.properties.status] = { status: { name: '중단' } };
+      return { results: [page(), done, stopped], has_more: false };
+    }
+    if (init.method === 'POST') requests.push({ path: url.pathname, ...JSON.parse(init.body) });
+    if (url.pathname.endsWith('/threads')) return { id: 'test-thread' };
+    return { id: 'test-message' };
+  });
+  p.notion.excludedStatuses = ['완료', '중단'];
+  await jobStep(result.openJob);
+  expect((await jobStep(result.openJob)).status).toBe('done');
+  const poll = await one(e.DB, 'SELECT * FROM polls WHERE id=?', result.pollId);
+  expect(poll.closes - poll.opens).toBe(300000);
+  expect(poll.week).toContain('#test:');
+  await run(
+    e.DB,
+    'INSERT INTO polls(id,project_id,week,opens,closes,members) VALUES(?,?,?,?,?,?)',
+    'regular',
+    p.id,
+    poll.display_week,
+    0,
+    1,
+    '[]',
+  );
+  expect((await jobStep(result.pollId + ':close')).status).toBe('pending');
+  expect(requests.filter((x) => x.content?.includes('마감되었습니다'))).toHaveLength(0);
+  await run(e.DB, 'UPDATE polls SET closes=0 WHERE id=?', result.pollId);
+  expect((await jobStep(result.pollId + ':close')).status).toBe('done');
+  expect(requests.find((x) => x.content?.includes('마감되었습니다')).path).toBe(
+    '/api/v10/channels/test-thread/messages',
+  );
+  for (let i = 0; i < 4; i++) await jobStep(result.reportJob);
+  expect((await one(e.DB, 'SELECT status FROM jobs WHERE id=?', result.reportJob)).status).toBe(
+    'done',
+  );
+  expect(
+    (await all(e.DB, 'SELECT * FROM report_items WHERE report_id=?', result.reportJob)).map(
+      (x) => x.page_id,
+    ),
+  ).toEqual(['page-1']);
+  expect(requests.find((x) => x.content?.includes('일정 투표')).path).toBe(
+    '/api/v10/channels/schedule/messages',
+  );
+  const reportMessage = requests.find((x) => x.content?.includes('미완료 상위 작업'));
+  expect(reportMessage.path).toBe('/api/v10/channels/report/messages');
+  for (const request of requests.filter((x) => x.content)) {
+    expect(request.content).toContain('[테스트]');
+    expect(request.allowed_mentions).toEqual({ parse: [], users: [] });
+  }
+  expect(await one(e.DB, "SELECT 1 FROM jobs WHERE kind IN ('dm','poll-remind')")).toBeNull();
 });
