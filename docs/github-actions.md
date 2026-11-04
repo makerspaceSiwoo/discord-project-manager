@@ -96,3 +96,9 @@ HTTP health 성공은 Worker 웹 응답을 확인한 것입니다. Discord·Noti
 - [Cloudflare GitHub Actions 배포](https://developers.cloudflare.com/workers/ci-cd/external-cicd/github-actions/)
 - [Worker Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
 - [D1 마이그레이션](https://developers.cloudflare.com/d1/reference/migrations/)
+
+## GitHub Secrets로 연결 진단하기
+
+`Inspect integrations` 수동 워크플로는 서버 ID와 Notion 루트 페이지 ID를 받아 채널·역할·멤버 및 하위 DB 스키마만 조회합니다. Discord 메시지나 Notion 페이지를 생성하지 않습니다. Repository Variable `INSPECTION_PUBLIC_KEY`에 운영자의 RSA 공개키(PEM)를 등록해야 합니다. 개인키는 운영자 기기에만 보관합니다.
+
+조회 결과는 AES-256-GCM으로 암호화하고 데이터 키를 RSA-OAEP-SHA256으로 감싸서 `integration-inspection` artifact에 저장합니다(보존 1일). 공개 로그에는 결과 본문과 API 토큰을 출력하지 않습니다. 해당 개인키를 잃어버렸다면 새 키 쌍과 공개키로 다시 실행해야 합니다. 개인키를 GitHub에 등록하거나 커밋하지 마세요.
