@@ -20,17 +20,17 @@
 | 공용 연결과 구분 | OAuth로 선택한 페이지 권한을 공용 DB 접근 권한과 혼동하지 않음            | 설계 반영, 실증 미확인 |
 | People 지정      | 공용 연결로 얻은 ID를 대상 DB 전용 테스트 행에 지정하고 재조회 시 동일 ID | 미확인                 |
 
-게스트가 workspace를 선택할 수 없거나 응답에서 실제 사용자 ID를 확인할 수 없으면 OAuth 경로는 채택하지 않습니다. 현재 구현에는 **개인 Notion OAuth 연결 경로를 넣지 않았습니다**. Discord OAuth만 동작하며, 아래 대안을 실제로 통과한 프로젝트에만 댓글 연결을 켭니다. OAuth를 추가할 때도 프로젝트·Discord 세션에 바인딩된 state, workspace ID 검증, 동일 ID 유일성, People 지정 검증은 그대로 적용해야 합니다. [공식 OAuth 흐름](https://developers.notion.com/guides/authorization/overview)
+게스트가 workspace를 선택할 수 없거나 응답에서 실제 사용자 ID를 확인할 수 없으면 OAuth 경로는 채택하지 않습니다. 현재 구현에는 **개인 Notion OAuth 연결 경로를 넣지 않았습니다**. Discord OAuth만 동작하며, 아래 댓글 연결에서 사용자마다 실제 검증을 수행합니다. OAuth를 추가할 때도 프로젝트·Discord 세션에 바인딩된 state, workspace ID 검증, 동일 ID 유일성, People 지정 검증은 그대로 적용해야 합니다. [공식 OAuth 흐름](https://developers.notion.com/guides/authorization/overview)
 
 ## 2. 댓글 대안의 격리된 검증
 
-운영 DB의 실제 업무 행을 검증 대상으로 사용하지 않습니다. 같은 구조의 테스트 DB와 전용 `probePageId`를 만들고, 테스트 배포에서만 임시 검증 기록과 `guestVerificationEnabled: true`를 설정합니다. 운영 설정은 검증 종료까지 `false`로 유지합니다.
+실제 업무 행은 검증 대상으로 사용하지 않습니다. 인증 페이지와 전용 `probePageId`를 준비하고 `linkingEnabled: true`로 본인 확인 절차를 엽니다. 투표·보고 알림은 `features.automation: false`로 유지한 상태에서 먼저 시험합니다. 게스트 실증 전에는 `guestVerificationEnabled: false`와 빈 `guestEvidence`를 유지하며 검증 기록을 임의로 만들지 않습니다.
 
 1. 소유자가 인증 페이지를 게스트에게 댓글 가능 권한으로 공유하고 공용 연결의 댓글 읽기 capability를 켭니다.
 2. 게스트 A가 Discord로 로그인한 원래 브라우저에서 코드를 발급합니다. 코드는 192비트 난수, 10분 만료이며 D1에는 해시만 저장합니다. 발급은 사용자당 1분 간격이고 새 발급은 이전 코드를 폐기합니다.
 3. 게스트 A가 지정 페이지에 **수정하지 않은 새 댓글**로 코드를 작성합니다. 실제 댓글 작성자가 A의 Notion 계정인지 확인합니다.
 4. 원래 Discord 세션에서 댓글 확인을 누릅니다. 서버는 100개씩 최대 5페이지를 읽습니다. 일치 댓글이 정확히 하나이고 발급 이후·만료 이전에 작성되었으며 수정되지 않았어야 합니다.
-5. 화면의 실제 사용자 이름과 **Notion ID**를 본인 계정과 대조합니다. 원래 Discord 사용자가 명시적으로 확인해야 하며 서버가 첫 댓글을 자동 선점 연결하지 않습니다.
+5. 화면의 실제 사용자 이름·이메일(권한이 없으면 미제공)과 **Notion ID**를 본인 계정과 대조합니다. 원래 Discord 사용자가 명시적으로 확인해야 하며 서버가 첫 댓글을 자동 선점 연결하지 않습니다.
 6. 최종 확인 시 댓글을 다시 조회하고 후보 ID와 댓글 ID가 유지되는지 확인합니다. 프로젝트별 잠금 아래 전용 probe 행이 대상 data source에 있는지 확인한 뒤 People을 지정하고 재조회합니다. 지정된 ID가 정확히 일치할 때만 연결을 저장합니다.
 7. DB의 `(project_id, discord_id)`와 `(project_id, notion_id)` 유일성, 코드 소비를 하나의 D1 batch로 처리합니다. 충돌이나 만료면 연결하지 않습니다.
 8. 실제 이슈 생성에서 해당 ID가 담당자로 지정되는지 확인합니다.

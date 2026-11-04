@@ -1,0 +1,53 @@
+name: Prepare onboarding
+on:
+  workflow_dispatch:
+    inputs:
+      guild_id:
+        description: Discord server ID
+        type: string
+        required: true
+      notion_root_page_id:
+        description: Notion root page ID
+        type: string
+        required: true
+      notion_source_id:
+        description: Notion issue data source ID
+        type: string
+        required: true
+      apply:
+        description: Create dedicated authentication resources and register commands
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: prepare-onboarding
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner && github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: node scripts/prepare-onboarding.mjs
+        env:
+          APPLY: ${{ inputs.apply }}
+          GUILD_ID: ${{ inputs.guild_id }}
+          NOTION_ROOT_PAGE_ID: ${{ inputs.notion_root_page_id }}
+          NOTION_SOURCE_ID: ${{ inputs.notion_source_id }}
+          DISCORD_APPLICATION_ID: ${{ vars.DISCORD_APPLICATION_ID }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          INSPECTION_PUBLIC_KEY: ${{ vars.INSPECTION_PUBLIC_KEY }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: onboarding-result
+          path: work/onboarding/result.encrypted.json
+          retention-days: 1
+          if-no-files-found: error
