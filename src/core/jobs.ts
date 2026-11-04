@@ -1,5 +1,5 @@
 import { syncIssue } from '../modules/issue-sync';
-import { Discord, safeText } from '../adapters/discord';
+import { type MessageOptions, Discord, safeText } from '../adapters/discord';
 import { Http } from '../adapters/http';
 import { Notion } from '../adapters/notion';
 import { issueSummary, issueThreadName, validateDraft } from '../modules/issues';
@@ -146,6 +146,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
     content: string,
     users: string[] = [],
     thread = false,
+    options: MessageOptions = {},
   ) => {
     const marker = `[연수리:${(await hash(id)).slice(0, 18)}]`,
       nonce = (await hash(id)).slice(0, 24);
@@ -153,7 +154,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       effect(
         db,
         id,
-        () => d.message(channel, content, users, nonce),
+        () => d.message(channel, content, users, nonce, options),
         () => d.findMessage(channel, marker, nonce),
       );
     return thread ? d.withOpenThread(channel, send) : send();
@@ -395,6 +396,8 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       storedWeek,
       testRun ? week : null,
     );
+    if (payload.refreshPresentation && !s.collected)
+      throw new AppError(409, '기존 보고 스냅샷만 수정할 수 있습니다.');
     if (!s.collected) {
       const page = await n.query(p, s.cursor);
       const items: Issue[] = page.results
@@ -418,33 +421,60 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       job.id,
       s.offset || 0,
     );
-    const full = `${testRun ? '[테스트] ' : ''}전체 표: ${env.APP_ORIGIN}/?report=${encodeURIComponent(job.id)}`;
+    const full = `${env.APP_ORIGIN}/?report=${encodeURIComponent(job.id)}`;
+    const publish = async (id: string, items: Parameters<typeof reportMessage>[0]) => {
+      const message = reportMessage(items, full, { testRun, first: !s.offset });
+      if (payload.refreshPresentation) {
+        const previous = await one(
+          db,
+          "SELECT result FROM effects WHERE id=? AND state='done'",
+          id,
+        );
+        if (!previous || !JSON.parse(previous.result).id)
+          throw new AppError(409, '수정할 기존 보고 메시지가 없습니다.');
+        const edited = await d.edit(
+          p.reportChannelId,
+          JSON.parse(previous.result).id,
+          message.content,
+          message.embeds,
+        );
+        await run(
+          db,
+          'UPDATE effects SET result=?,updated_at=? WHERE id=?',
+          JSON.stringify(edited),
+          Date.now(),
+          id,
+        );
+      } else {
+        await sent(id, p.reportChannelId, message.content, [], false, message);
+      }
+    };
     if (rows.length) {
       const i = JSON.parse(rows[0].payload),
-        link = await one(db, 'SELECT thread_id FROM issue_links WHERE page_id=?', i.id);
+        link = await one(
+          db,
+          'SELECT thread_id FROM issue_links WHERE page_id=? AND project_id=?',
+          i.id,
+          p.id,
+        );
       if (link?.thread_id)
         i.discordUrl = `https://discord.com/channels/${p.guildId}/${link.thread_id}`;
       const mappings = await all(
         db,
-        'SELECT notion_id,discord_id FROM links WHERE project_id=?',
+        'SELECT notion_id,discord_id FROM links WHERE project_id=? AND (valid_until=0 OR valid_until>?)',
         p.id,
+        Date.now(),
       );
-      i.names = i.assignees.map(
-        (id: string) => mappings.find((m) => m.notion_id === id)?.discord_id || `Notion:${id}`,
-      );
-      await sent(
-        `${job.id}:row:${s.offset || 0}`,
-        p.reportChannelId,
-        (testRun ? '[테스트]\n' : '') + reportMessage([i], full),
-      );
+      i.names = i.assignees.map((id: string) => {
+        const discordId = mappings.find((m) => m.notion_id === id)?.discord_id;
+        return discordId
+          ? `<@${discordId}>`
+          : safeText(i.assigneeNames?.[id] || 'Notion 사용자 (미연결)');
+      });
+      await publish(`${job.id}:row:${s.offset || 0}`, [i]);
       return { ...s, offset: (s.offset || 0) + 1 };
     }
-    if (!s.offset)
-      await sent(
-        `${job.id}:empty`,
-        p.reportChannelId,
-        (testRun ? '[테스트]\n' : '') + reportMessage([], full),
-      );
+    if (!s.offset) await publish(`${job.id}:empty`, []);
     await run(db, 'UPDATE report_runs SET complete=1 WHERE id=?', job.id);
     return null;
   }

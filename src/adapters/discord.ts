@@ -1,6 +1,17 @@
 import { AppError, type Env, type Member, type Project, RemoteError } from '../core/types';
 import { Http } from './http';
 import { projectMember } from '../core/access';
+export interface DiscordEmbed {
+  title: string;
+  url?: string;
+  color: number;
+  description?: string;
+  fields: { name: string; value: string; inline?: boolean }[];
+}
+export interface MessageOptions {
+  embeds?: DiscordEmbed[];
+  mentionEveryone?: boolean;
+}
 export class Discord {
   constructor(
     private env: Env,
@@ -35,17 +46,25 @@ export class Discord {
       .map((m) => ({ id: m.user.id, name: m.nick || m.user.global_name || m.user.username }));
     return { members: selected, after: members.length === 100 ? members.at(-1).user.id : null };
   }
-  message(channel: string, content: string, users: string[] = [], nonce?: string) {
+  message(
+    channel: string,
+    content: string,
+    users: string[] = [],
+    nonce?: string,
+    options: MessageOptions = {},
+  ) {
     return this.api(`/channels/${channel}/messages`, 'POST', {
       content,
-      allowed_mentions: { parse: [], users },
+      allowed_mentions: { parse: options.mentionEveryone ? ['everyone'] : [], users },
+      ...(options.embeds ? { embeds: options.embeds } : {}),
       ...(nonce ? { nonce, enforce_nonce: true } : {}),
     });
   }
-  edit(channel: string, id: string, content: string) {
+  edit(channel: string, id: string, content: string, embeds?: DiscordEmbed[]) {
     return this.api(`/channels/${channel}/messages/${id}`, 'PATCH', {
       content,
       allowed_mentions: { parse: [] },
+      ...(embeds ? { embeds } : {}),
     });
   }
   async findMessage(channel: string, marker: string, nonce?: string) {

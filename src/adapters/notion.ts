@@ -66,6 +66,9 @@ export class Notion {
       title: plain(v[m.title]?.title) || '(제목 없음)',
       due: v[m.due]?.date?.start?.slice(0, 10) || null,
       assignees: (v[m.assignees]?.people || []).map((u: any) => u.id),
+      assigneeNames: Object.fromEntries(
+        (v[m.assignees]?.people || []).filter((u: any) => u.name).map((u: any) => [u.id, u.name]),
+      ),
       type: v[m.type]?.select?.name || '',
       priority: v[m.priority]?.select?.name || '',
       status: v[m.status]?.[p.notion.statusType]?.name || '',

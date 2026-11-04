@@ -74,6 +74,7 @@ export interface Issue {
   title: string;
   due: string | null;
   assignees: string[];
+  assigneeNames?: Record<string, string>;
   type: string;
   priority: string;
   status: string;

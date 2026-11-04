@@ -508,13 +508,28 @@ describe('보고와 이슈 입력', () => {
       'z',
     ]);
   });
-  it('긴 제목/담당자도 Discord 메시지 제한 내 요약', () => {
+  it('긴 제목/담당자를 Discord Embed 제한 내에 표시하고 멘션은 첫 정식 보고만 허용', () => {
+    const items = [issue({ title: '한'.repeat(2000), assignees: Array(100).fill(nid) })];
+    const first = reportMessage(items, 'https://example.com/report', { first: true });
+    expect(first.content).toContain('@everyone');
+    expect(first.mentionEveryone).toBe(true);
+    expect(first.content).not.toContain('```');
+    expect(first.embeds[0].title.length).toBeLessThanOrEqual(256);
+    for (const field of first.embeds[0].fields)
+      expect(field.value.length).toBeLessThanOrEqual(1024);
+    expect(JSON.stringify(first.embeds)).not.toContain(nid);
+    for (const options of [{ first: false }, { first: true, testRun: true }]) {
+      const result = reportMessage(items, 'https://example.com/report', options);
+      expect(result.content).not.toContain('@everyone');
+      expect(result.mentionEveryone).toBe(false);
+    }
+    expect(reportMessage([], 'https://example.com/report', { first: true }).mentionEveryone).toBe(
+      true,
+    );
     expect(
-      reportMessage(
-        [issue({ title: '한'.repeat(2000), assignees: Array(30).fill(nid) })],
-        '전체 표 링크',
-      ).length,
-    ).toBeLessThan(2000);
+      reportMessage([], 'https://example.com/report', { first: true, testRun: true })
+        .mentionEveryone,
+    ).toBe(false);
   });
   it('필수값과 실제 달력 날짜 검증, 최신 Modal Label 파싱', () => {
     expect(validateDraft(draft, p)).toEqual(draft);
@@ -526,7 +541,9 @@ describe('보고와 이슈 입력', () => {
     });
   });
   it('Notion 모든 페이지를 수집한 뒤 정렬하여 누락 없이 게시', async () => {
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, id, nid, 0, 0);
     let query = 0;
+    const delivered: any[] = [];
     fake((url, init) => {
       if (url.pathname.endsWith('/query')) {
         query++;
@@ -534,12 +551,25 @@ describe('보고와 이슈 입력', () => {
           ? { results: [page()], has_more: true, next_cursor: 'next' }
           : { results: [page({ id: 'page-2', created_time: '2026-10-01' })], has_more: false };
       }
-      if (url.pathname.endsWith('/messages')) return { id: 'message-' + Math.random() };
+      if (url.pathname.endsWith('/messages')) {
+        delivered.push(JSON.parse(init.body));
+        return { id: 'message-' + Math.random() };
+      }
       throw new Error('unexpected ' + url.pathname);
     });
     await enqueue(e.DB, 'report-job', 'report', { week: '2026-11-09' });
     for (let i = 0; i < 5; i++) await jobStep('report-job');
     expect(query).toBe(2);
+    expect(delivered).toHaveLength(2);
+    expect(delivered[0].allowed_mentions).toEqual({ parse: ['everyone'], users: [] });
+    expect(delivered[0].content).toContain('@everyone');
+    expect(delivered[1].allowed_mentions).toEqual({ parse: [], users: [] });
+    expect(delivered[1].content).not.toContain('@everyone');
+    expect(delivered[0].embeds[0].title).toBe('[TASK-1] 업무');
+    expect(delivered[0].embeds[0].fields.find((f: any) => f.name === '담당자').value).toBe(
+      `<@${id}>`,
+    );
+
     expect((await all(e.DB, 'SELECT * FROM report_items')).length).toBe(2);
     expect((await one(e.DB, 'SELECT complete FROM report_runs')).complete).toBe(1);
   });
@@ -1603,4 +1633,60 @@ it('중복 테스트 실행 요청은 1분간 같은 실행을 반환한다', as
   expect(
     (await all(e.DB, "SELECT * FROM jobs WHERE kind IN ('test-poll-open','test-report')")).length,
   ).toBe(2);
+});
+
+it('기존 테스트 보고를 새 게시나 멘션 없이 Embed로 수정한다', async () => {
+  const testId = 'refresh';
+  const jobId = `test:${p.id}:${testId}:report`;
+  await run(
+    e.DB,
+    'INSERT INTO report_runs(id,project_id,week,display_week) VALUES(?,?,?,?)',
+    jobId,
+    p.id,
+    '2026-11-09#test:refresh',
+    '2026-11-09',
+  );
+  await enqueue(e.DB, jobId, 'test-report', {
+    week: '2026-11-09',
+    testId,
+    refreshPresentation: true,
+  });
+  await run(
+    e.DB,
+    'UPDATE jobs SET state=? WHERE id=?',
+    JSON.stringify({ collected: true, offset: 0 }),
+    jobId,
+  );
+  await run(
+    e.DB,
+    'INSERT INTO report_items VALUES(?,?,?,?,?,?)',
+    jobId,
+    'page-1',
+    JSON.stringify(new Notion(e).normalize(p, page())),
+    '2026-11-09',
+    0,
+    '2026-11-01',
+  );
+  await run(
+    e.DB,
+    'INSERT INTO effects VALUES(?,?,?,?)',
+    `${jobId}:row:0`,
+    'done',
+    JSON.stringify({ id: 'existing' }),
+    0,
+  );
+  const edits: any[] = [];
+  fake((url, init) => {
+    expect(init.method).toBe('PATCH');
+    expect(url.pathname).toBe('/api/v10/channels/report/messages/existing');
+    edits.push(JSON.parse(init.body));
+    return { id: 'existing' };
+  });
+  await jobStep(jobId);
+  expect((await jobStep(jobId)).status).toBe('done');
+  expect(edits).toHaveLength(1);
+  expect(edits[0].content).toContain('[테스트]');
+  expect(edits[0].content).not.toContain('@everyone');
+  expect(edits[0].allowed_mentions).toEqual({ parse: [] });
+  expect(edits[0].embeds).toHaveLength(1);
 });
