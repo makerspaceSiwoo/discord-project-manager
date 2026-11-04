@@ -173,7 +173,7 @@ function renderCalendar(polls) {
     );
   const hero = heading(
     'WEEKLY SCHEDULE',
-    '우리 팀이 가능한 시간',
+    poll.testRun ? '[테스트] 우리 팀이 가능한 시간' : '우리 팀이 가능한 시간',
     '각 시간에 가능한 팀원을 한눈에 확인하세요.',
   );
   hero.append(el('span', { class: 'pill' }, closed ? '● 마감 · 확정 결과' : '● 투표 진행 중'));
@@ -191,7 +191,11 @@ function renderCalendar(polls) {
   for (const x of polls) {
     const end = new Date(x.week + 'T00:00:00Z');
     end.setUTCDate(end.getUTCDate() + 6);
-    const o = el('option', { value: x.id }, x.week + ' ~ ' + end.toISOString().slice(0, 10));
+    const o = el(
+      'option',
+      { value: x.id },
+      (x.testRun ? '[테스트] ' : '') + x.week + ' ~ ' + end.toISOString().slice(0, 10),
+    );
     if (x.id === poll.id) o.selected = true;
     chooser.append(o);
   }
@@ -650,7 +654,7 @@ async function reports() {
       el(
         'a',
         { class: 'linkrow', href: '/?report=' + encodeURIComponent(r.id) },
-        `${r.week} 주간 보고 · ${r.complete ? '게시 완료' : '수집 또는 게시 중'}`,
+        `${r.testRun ? '[테스트] ' : ''}${r.week} 주간 보고 · ${r.complete ? '게시 완료' : '수집 또는 게시 중'}`,
       ),
     );
   app.append(box);
@@ -660,7 +664,7 @@ async function showReport(id) {
   app.replaceChildren(
     heading(
       'WEEKLY REPORT',
-      r.week + ' · 주간 보고',
+      (r.testRun ? '[테스트] ' : '') + r.week + ' · 주간 보고',
       r.complete
         ? '확정된 보고서 스냅샷입니다. 최신 정보는 Notion 원문을 확인하세요.'
         : '수집 또는 Discord 게시가 진행 중입니다.',
@@ -789,6 +793,21 @@ async function admin() {
     );
   }
   app.append(requestPanel);
+  app.append(
+    action('5분 테스트 투표 · 주간 보고 발송', async () => {
+      if (
+        !confirm(
+          '일정-투표와 주간-보고에 [테스트] 메시지를 실제 발송합니다. 투표는 5분 뒤 마감하고 결과를 보냅니다. 실행할까요?',
+        )
+      )
+        return;
+      const result = await api('/api/admin/test-run', 'POST', { minutes: 5 });
+      notify('테스트를 예약했습니다. 채널에 게시될 때까지 잠시 기다려 주세요.');
+      app.append(
+        el('a', { href: '/?poll=' + encodeURIComponent(result.pollId) }, '테스트 투표 열기'),
+      );
+    }),
+  );
   const out = el('pre', { class: 'json' }, JSON.stringify(data, null, 2));
   const input = el('input', {
     type: 'text',

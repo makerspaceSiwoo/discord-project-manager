@@ -75,6 +75,8 @@ export async function pollView(db: D1Database, p: Project, id: string, userId: s
   const members: Member[] = JSON.parse(poll.members);
   return {
     ...poll,
+    week: poll.display_week || poll.week,
+    testRun: !!poll.display_week,
     members,
     votes: votes.map((v) => ({ userId: v.user_id, slots: JSON.parse(v.slots) })),
     editable:

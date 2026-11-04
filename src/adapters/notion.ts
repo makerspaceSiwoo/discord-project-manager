@@ -69,6 +69,7 @@ export class Notion {
       type: v[m.type]?.select?.name || '',
       priority: v[m.priority]?.select?.name || '',
       status: v[m.status]?.[p.notion.statusType]?.name || '',
+      statusColor: v[m.status]?.[p.notion.statusType]?.color || 'default',
       created: v[m.created]?.created_time || page.created_time,
       parentIds: (v[m.parent]?.relation || []).map((r: any) => r.id),
       archived: !!(page.archived || page.is_archived || page.in_trash),

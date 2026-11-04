@@ -1,3 +1,5 @@
+import { startManualTest } from './modules/manual-tests';
+import { scheduleIssueSync } from './modules/issue-sync';
 import {
   emailCapabilities,
   requestEmailLink,
@@ -138,7 +140,7 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
       return json(
         await all(
           env.DB,
-          'SELECT id,week,opens,closes FROM polls WHERE project_id=? ORDER BY week DESC LIMIT 104',
+          'SELECT id,COALESCE(display_week,week) AS week,display_week IS NOT NULL AS testRun,opens,closes FROM polls WHERE project_id=? ORDER BY week DESC LIMIT 104',
           p.id,
         ),
       );
@@ -173,7 +175,7 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
       return json(
         await all(
           env.DB,
-          'SELECT id,week,complete FROM report_runs WHERE project_id=? ORDER BY week DESC LIMIT 104',
+          'SELECT id,COALESCE(display_week,week) AS week,display_week IS NOT NULL AS testRun,complete FROM report_runs WHERE project_id=? ORDER BY week DESC LIMIT 104',
           p.id,
         ),
       );
@@ -191,6 +193,8 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
       );
       return json({
         ...row,
+        week: row.display_week || row.week,
+        testRun: !!row.display_week,
         items: items.map((i) => ({
           ...JSON.parse(i.payload),
           discordUrl: i.thread_id
@@ -215,6 +219,8 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
     }
     if (path.startsWith('/api/admin/')) {
       if (!who.admin) throw new AppError(403, '관리자 권한이 필요합니다.');
+      if (path === '/api/admin/test-run' && req.method === 'POST')
+        return json(await startManualTest(env, p, who, (await input()).minutes ?? 5));
       if (path === '/api/admin/link-capabilities' && req.method === 'GET')
         return json(await emailCapabilities(env, who));
       if (path === '/api/admin/link-requests' && req.method === 'GET')
@@ -254,6 +260,7 @@ async function handle(req: Request, env: Env, ctx: ExecutionContext, responseHea
         });
       }
       if (path === '/api/admin/run' && req.method === 'POST') {
+        await scheduleIssueSync(env, p);
         await schedule(env, p);
         await processOne(env, p);
         return json({ ok: true });
@@ -317,6 +324,7 @@ export default {
     ctx.waitUntil(
       (async () => {
         const p = await project(env);
+        await scheduleIssueSync(env, p);
         await schedule(env, p);
         await processOne(env, p);
       })(),

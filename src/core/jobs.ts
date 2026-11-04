@@ -1,6 +1,7 @@
+import { syncIssue } from '../modules/issue-sync';
 import { Discord, safeText } from '../adapters/discord';
 import { Http } from '../adapters/http';
-import { Notion, plain } from '../adapters/notion';
+import { Notion } from '../adapters/notion';
 import { issueSummary, issueThreadName, validateDraft } from '../modules/issues';
 import { addDays, currentWeek, timing } from '../modules/scheduling';
 import { rank, reportable, reportMessage } from '../modules/reporting';
@@ -53,6 +54,7 @@ export async function schedule(env: Env, p: Project, at = Date.now()) {
 }
 export async function processOne(env: Env, p: Project, preferred?: string) {
   const allowedKinds = [
+    ...(p.enabled ? ['test-poll-open', 'test-poll-close', 'test-report'] : []),
     ...(issuesEnabled(p) ? ['issue-create', 'issue-sync', 'assignee-notify'] : []),
     ...(automationEnabled(p) ? ['poll-open', 'poll-remind', 'poll-close', 'report', 'dm'] : []),
   ];
@@ -130,6 +132,8 @@ export async function processOne(env: Env, p: Project, preferred?: string) {
   }
 }
 async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
+  const testRun = job.kind.startsWith('test-');
+  const kind = testRun ? job.kind.slice(5) : job.kind;
   const payload = JSON.parse(job.payload),
     s = JSON.parse(job.state),
     http = new Http(),
@@ -154,7 +158,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       );
     return thread ? d.withOpenThread(channel, send) : send();
   };
-  if (job.kind === 'issue-create') {
+  if (kind === 'issue-create') {
     const draft = validateDraft(payload.draft, p),
       requestId = job.id;
     if (!s.pageId) {
@@ -242,146 +246,15 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
     await enqueue(db, `${job.id}:initial-sync`, 'issue-sync', { pageId: s.pageId });
     return null;
   }
-  if (job.kind === 'issue-sync') {
-    const link = await one(
-      db,
-      'SELECT * FROM issue_links WHERE page_id=? AND project_id=?',
-      payload.pageId,
-      p.id,
-    );
-    if (!link?.thread_id) return null;
-    let page: any;
-    try {
-      page = await n.api(`/pages/${payload.pageId}`);
-    } catch (e) {
-      if (e instanceof RemoteError && e.status === 404) {
-        await d.withOpenThread(link.thread_id, () =>
-          d.edit(
-            p.issueChannelMode === 'forum' ? link.thread_id : p.issueChannelId,
-            link.message_id,
-            'Notion 페이지 삭제 또는 접근 불가 · 대화 기록은 보존됩니다.',
-          ),
-        );
-        return null;
-      }
-      throw e;
-    }
-    if (link.last_edited && page.last_edited_time < link.last_edited) return null;
-    const i = n.normalize(p, page);
-    // Discord contains a bounded summary, the Notion link remains the full source.
-    const body = i.archived
-      ? { results: [] }
-      : await n.api(`/blocks/${page.id}/children?page_size=25`);
-    i.description = body.results
-      .map((b: any) => plain(b[b.type]?.rich_text))
-      .filter(Boolean)
-      .join('\n');
-    const mappings = await all(
-      db,
-      'SELECT discord_id,notion_id FROM links WHERE project_id=? AND (valid_until=0 OR valid_until>?)',
-      p.id,
-      Date.now(),
-    );
-    const assigned = mappings.filter((m) => i.assignees.includes(m.notion_id));
-    const previous: string[] = JSON.parse(link.assignees),
-      newOnes = assigned.filter((m) => !previous.includes(m.notion_id));
-    let cleanedMessages = 0;
-    await d.withOpenThread(link.thread_id, async () => {
-      await d.api(`/channels/${link.thread_id}`, 'PATCH', {
-        name: issueThreadName(i),
-      });
-      await d.edit(
-        p.issueChannelMode === 'forum' ? link.thread_id : p.issueChannelId,
-        link.message_id,
-        issueSummary(
-          i,
-          assigned.map((m) => m.discord_id),
-        ),
-      );
-      if (payload.refreshPresentation) {
-        // Only rewrite known bot notifications belonging to this linked issue.
-        const notices = await all(
-          db,
-          `SELECT e.id,e.result FROM effects e JOIN jobs j ON j.id=e.id
-          WHERE e.state='done' AND j.kind='assignee-notify' AND json_extract(j.payload,'$.pageId')=?
-          AND json_extract(j.payload,'$.threadId')=? ORDER BY j.created_at DESC LIMIT 4`,
-          i.id,
-          link.thread_id,
-        );
-        for (const notice of notices) {
-          const messageId = JSON.parse(notice.result).id;
-          let message: any;
-          try {
-            message = await d.api(`/channels/${link.thread_id}/messages/${messageId}`);
-          } catch (error) {
-            if (error instanceof RemoteError && error.status === 404) continue;
-            throw error;
-          }
-          const marker = `[연수리:${(await hash(notice.id)).slice(0, 18)}]`;
-          if (
-            message.author?.id !== env.DISCORD_APPLICATION_ID ||
-            !message.content?.endsWith('\n' + marker)
-          )
-            continue;
-          await d.edit(link.thread_id, messageId, message.content.slice(0, -marker.length - 1));
-          cleanedMessages++;
-        }
-      }
-    });
-    await db.batch([
-      ...newOnes.map((m) =>
-        db
-          .prepare(
-            'INSERT OR IGNORE INTO jobs(id,kind,payload,next_at,created_at) VALUES(?,?,?,?,?)',
-          )
-          .bind(
-            `assignee:${i.id}:${i.edited}:${m.discord_id}`,
-            'assignee-notify',
-            JSON.stringify({
-              pageId: i.id,
-              notionId: m.notion_id,
-              userId: m.discord_id,
-              threadId: link.thread_id,
-            }),
-            Date.now(),
-            Date.now(),
-          ),
-      ),
-      db
-        .prepare('UPDATE issue_links SET last_edited=?,assignees=? WHERE page_id=?')
-        .bind(i.edited, JSON.stringify(i.assignees), i.id),
-    ]);
-    return payload.refreshPresentation
-      ? { finished: true, presentationUpdated: true, cleanedMessages }
-      : null;
-  }
-  if (job.kind === 'assignee-notify') {
-    const mapping = await one(
-      db,
-      'SELECT 1 FROM links WHERE project_id=? AND discord_id=? AND notion_id=? AND (valid_until=0 OR valid_until>?)',
-      p.id,
-      payload.userId,
-      payload.notionId,
-      Date.now(),
-    );
-    if (!mapping) return null;
-    const page = await n.api(`/pages/${payload.pageId}`),
-      i = n.normalize(p, page);
-    if (i.archived || !i.assignees.includes(payload.notionId)) return null;
-    try {
-      await d.member(p, payload.userId);
-    } catch (e) {
-      if (e instanceof AppError && e.status === 403) return null;
-      throw e;
-    }
-    await sent(job.id, payload.threadId, `새 담당자: <@${payload.userId}>`, [payload.userId], true);
-    return null;
-  }
+  if (kind === 'issue-sync') return syncIssue(env, p, n, d, payload);
+  // Drain old queued notifications without creating new activity messages.
+  if (kind === 'assignee-notify') return null;
   const week = payload.week,
-    pollId = `${p.id}:${week}`,
+    pollId = testRun ? `test:${p.id}:${payload.testId}` : `${p.id}:${week}`,
+    storedWeek = testRun ? `${week}#test:${payload.testId}` : week,
     t = week ? timing(week, p) : null;
-  if (job.kind === 'poll-open') {
-    if (Date.now() >= t!.closes)
+  if (kind === 'poll-open') {
+    if (!testRun && Date.now() >= t!.closes)
       throw new AppError(
         409,
         '투표 개시를 마감 전에 실행하지 못했습니다. 과거 대상 명단을 추정해 생성하지 않습니다.',
@@ -397,28 +270,41 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       if (r.after) return { ...s, members, after: r.after };
       await run(
         db,
-        'INSERT OR IGNORE INTO polls(id,project_id,week,opens,closes,members) VALUES(?,?,?,?,?,?)',
+        'INSERT OR IGNORE INTO polls(id,project_id,week,opens,closes,members,display_week) VALUES(?,?,?,?,?,?,?)',
         pollId,
         p.id,
-        week,
-        t!.opens,
-        t!.closes,
+        storedWeek,
+        testRun ? 0 : t!.opens,
+        testRun ? 0 : t!.closes,
         JSON.stringify(members),
+        testRun ? week : null,
       );
       return { ...s, rosterDone: true };
+    }
+    if (testRun) {
+      const opens = Date.now();
+      await run(
+        db,
+        'UPDATE polls SET opens=?,closes=? WHERE id=? AND opens=0',
+        opens,
+        opens + payload.durationMinutes * 60_000,
+        pollId,
+      );
     }
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', pollId);
     const message = await sent(
       `${job.id}:notice`,
       p.schedulingChannelId,
-      `🗓️ **${week} 주간 일정 투표**\n월~일 09:00~23:00 · 30분 단위\n일요일 자정 전까지 저장하세요.\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}\n대상 ${JSON.parse(poll.members).length}명`,
+      testRun
+        ? `[테스트] **${week} ~ ${addDays(week, 6)} 일정 투표**\n${payload.durationMinutes}분 테스트 · 마감 ${new Date(poll.closes).toLocaleString('ko-KR', { timeZone: p.timezone })}\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}`
+        : `🗓️ **${week} 주간 일정 투표**\n월~일 09:00~23:00 · 30분 단위\n일요일 자정 전까지 저장하세요.\n${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}\n대상 ${JSON.parse(poll.members).length}명`,
     );
     const thread = await effect(
       db,
       `${job.id}:thread`,
       () =>
         d.api(`/channels/${p.schedulingChannelId}/messages/${message.id}/threads`, 'POST', {
-          name: `${week} 일정 이야기`,
+          name: `${testRun ? '[테스트] ' : ''}${week} 일정 이야기`,
           auto_archive_duration: 1440,
         }),
       async () => {
@@ -437,9 +323,10 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       thread.id,
       pollId,
     );
+    if (testRun) await enqueue(db, `${pollId}:close`, 'test-poll-close', payload, poll.closes);
     return null;
   }
-  if (job.kind === 'poll-remind') {
+  if (kind === 'poll-remind') {
     if (Date.now() >= t!.closes) return null;
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', pollId);
     if (!poll) throw new RemoteError('poll-not-ready', 503, 60);
@@ -447,7 +334,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       await enqueue(db, `${job.id}:${m.id}`, 'dm', { pollId, userId: m.id });
     return null;
   }
-  if (job.kind === 'dm') {
+  if (kind === 'dm') {
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', payload.pollId);
     if (
       !poll ||
@@ -473,33 +360,40 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
     }
     return null;
   }
-  if (job.kind === 'poll-close') {
+  if (kind === 'poll-close') {
     // Also defer jobs queued by older deployments until the result publication time.
-    if (Date.now() < t!.report)
+    if (!testRun && Date.now() < t!.report)
       throw new RemoteError(
         'poll-result-not-ready',
         429,
         Math.ceil((t!.report - Date.now()) / 1000),
       );
     const poll = await one(db, 'SELECT * FROM polls WHERE id=?', pollId);
+    if (testRun && poll && Date.now() < poll.closes)
+      throw new RemoteError(
+        'poll-result-not-ready',
+        429,
+        Math.ceil((poll.closes - Date.now()) / 1000),
+      );
     if (!poll?.thread_id)
       throw new AppError(409, '원래 투표 스레드가 없습니다. 개시 작업을 복구하세요.');
     await sent(
       job.id,
       poll.thread_id,
-      `✅ ${week} 투표가 마감되었습니다. 확정 결과: ${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}&tab=team`,
+      `${testRun ? '[테스트] ' : ''}✅ ${week} 투표가 마감되었습니다. 확정 결과: ${env.APP_ORIGIN}/?poll=${encodeURIComponent(pollId)}&tab=team`,
       [],
       true,
     );
     return null;
   }
-  if (job.kind === 'report') {
+  if (kind === 'report') {
     await run(
       db,
-      'INSERT OR IGNORE INTO report_runs(id,project_id,week) VALUES(?,?,?)',
+      'INSERT OR IGNORE INTO report_runs(id,project_id,week,display_week) VALUES(?,?,?,?)',
       job.id,
       p.id,
-      week,
+      storedWeek,
+      testRun ? week : null,
     );
     if (!s.collected) {
       const page = await n.query(p, s.cursor);
@@ -524,7 +418,7 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       job.id,
       s.offset || 0,
     );
-    const full = `전체 표: ${env.APP_ORIGIN}/?report=${encodeURIComponent(job.id)}`;
+    const full = `${testRun ? '[테스트] ' : ''}전체 표: ${env.APP_ORIGIN}/?report=${encodeURIComponent(job.id)}`;
     if (rows.length) {
       const i = JSON.parse(rows[0].payload),
         link = await one(db, 'SELECT thread_id FROM issue_links WHERE page_id=?', i.id);
@@ -538,10 +432,19 @@ async function execute(env: Env, p: Project, job: Job): Promise<any | null> {
       i.names = i.assignees.map(
         (id: string) => mappings.find((m) => m.notion_id === id)?.discord_id || `Notion:${id}`,
       );
-      await sent(`${job.id}:row:${s.offset || 0}`, p.reportChannelId, reportMessage([i], full));
+      await sent(
+        `${job.id}:row:${s.offset || 0}`,
+        p.reportChannelId,
+        (testRun ? '[테스트]\n' : '') + reportMessage([i], full),
+      );
       return { ...s, offset: (s.offset || 0) + 1 };
     }
-    if (!s.offset) await sent(`${job.id}:empty`, p.reportChannelId, reportMessage([], full));
+    if (!s.offset)
+      await sent(
+        `${job.id}:empty`,
+        p.reportChannelId,
+        (testRun ? '[테스트]\n' : '') + reportMessage([], full),
+      );
     await run(db, 'UPDATE report_runs SET complete=1 WHERE id=?', job.id);
     return null;
   }
