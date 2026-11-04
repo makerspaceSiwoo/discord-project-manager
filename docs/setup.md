@@ -104,8 +104,10 @@ node --env-file=.dev.vars scripts/notion-schema.mjs config/project.local.json
 
 ```sh
 npx wrangler login
-npx wrangler d1 create yeonsuri
+npx wrangler d1 create project-manager
 ```
+
+D1 이름은 `project-manager`, 코드의 binding 이름은 `DB`입니다. 이미 같은 이름의 DB가 있다면 `npx wrangler d1 list`로 확인하고 스키마가 현재 브랜치와 호환되는지 점검한 뒤 해당 DB ID를 사용합니다. 설정의 이름 변경만으로 기존 원격 DB의 이름이나 데이터가 이전되지는 않습니다.
 
 반환된 database ID를 `wrangler.jsonc`의 `d1_databases[0].database_id`에 입력합니다. `APP_ORIGIN`은 실제 workers.dev URL로 바꾸고 후행 `/`는 제거합니다. `PROJECT_ID`는 설정 JSON의 `id`와 같아야 합니다.
 

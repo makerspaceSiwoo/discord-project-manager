@@ -60,7 +60,7 @@ VALUES('manual-sync:고유식별자','issue-sync','{"pageId":"확인한-page-id"
 ## 백업과 정리
 
 ```sh
-npx wrangler d1 export yeonsuri --remote --output work/backup.sql
+npx wrangler d1 export project-manager --remote --output work/backup.sql
 ```
 
 백업에는 사용자 ID·투표가 있으므로 비공개로 보관하고 Git에 커밋하지 않습니다. 복구는 새 D1에 검증한 export를 적용하고 binding을 전환하는 방식이 안전합니다. Free Time Travel 기간은 7일이므로 장기 백업을 대체하지 않습니다.

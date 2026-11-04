@@ -84,7 +84,7 @@ const r = spawnSync(
     'node_modules/wrangler/bin/wrangler.js',
     'd1',
     'execute',
-    'yeonsuri',
+    'project-manager',
     process.argv.includes('--remote') ? '--remote' : '--local',
     '--file',
     'work/config.sql',
