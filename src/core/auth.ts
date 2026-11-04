@@ -4,6 +4,8 @@ import { Http } from '../adapters/http';
 import { hash, random } from './crypto';
 import { all, one, run } from './db';
 import { AppError, RemoteError, type Env, type Identity, type Project } from './types';
+const SESSION_SECONDS = 90 * 24 * 3600;
+const SESSION_REFRESH_MARGIN = (90 - 1) * 86400_000;
 export const cookies = (r: Request) =>
   Object.fromEntries((r.headers.get('cookie') || '').split(';').map((x) => x.trim().split('=')));
 async function loginStep<T>(
@@ -113,10 +115,10 @@ export async function callback(req: Request, env: Env, p: Project) {
     user.id,
     user.global_name || user.username,
     random(),
-    Date.now() + 8 * 3600_000,
+    Date.now() + SESSION_SECONDS * 1000,
   );
   const headers = new Headers({ Location: '/', 'Cache-Control': 'no-store' });
-  headers.append('Set-Cookie', cookie(env, 'session', session, 8 * 3600));
+  headers.append('Set-Cookie', cookie(env, 'session', session, SESSION_SECONDS));
   headers.append('Set-Cookie', cookie(env, 'oauth_browser', '', 0));
   return new Response(null, { status: 302, headers });
 }
@@ -151,7 +153,21 @@ export async function authorize(req: Request, env: Env, p: Project): Promise<Ide
     (req.headers.get('origin') !== env.APP_ORIGIN || req.headers.get('x-csrf-token') !== s.csrf)
   )
     throw new AppError(403, '요청 출처 또는 CSRF 검증 실패');
+  let sessionCookie: string | undefined;
+  if (s.expires - Date.now() < SESSION_REFRESH_MARGIN) {
+    const extended = await run(
+      env.DB,
+      'UPDATE sessions SET expires=? WHERE hash=? AND expires>?',
+      Date.now() + SESSION_SECONDS * 1000,
+      sessionHash,
+      Date.now(),
+    );
+    if (!extended.meta.changes)
+      throw new AppError(401, '로그인이 해제되었습니다. 다시 로그인하세요.');
+    sessionCookie = cookie(env, 'session', raw, SESSION_SECONDS);
+  }
   return {
+    sessionCookie,
     userId: s.user_id,
     name: s.name,
     sessionHash,
@@ -169,7 +185,7 @@ export async function logout(env: Env, identity: Identity) {
 export async function linkedMembers(env: Env, p: Project) {
   return all(
     env.DB,
-    'SELECT l.discord_id,l.notion_id,COALESCE(MAX(s.name),l.discord_id) AS name FROM links l LEFT JOIN sessions s ON s.user_id=l.discord_id WHERE l.project_id=? AND l.valid_until>? GROUP BY l.discord_id,l.notion_id',
+    'SELECT l.discord_id,l.notion_id,COALESCE(MAX(s.name),l.discord_id) AS name FROM links l LEFT JOIN sessions s ON s.user_id=l.discord_id WHERE l.project_id=? AND (l.valid_until=0 OR l.valid_until>?) GROUP BY l.discord_id,l.notion_id',
     p.id,
     Date.now(),
   );

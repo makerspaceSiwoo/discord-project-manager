@@ -539,13 +539,29 @@ async function account() {
     panel.append(
       el('h2', {}, '연결된 Notion 계정'),
       el('code', {}, me.link.notion_id),
-      el('p', {}, '재검증 기한: ' + new Date(me.link.valid_until).toLocaleString('ko-KR')),
+      el(
+        'p',
+        {},
+        me.link.valid_until === 0
+          ? '연결 유지 중 · 직접 해제하거나 접근 권한이 철회될 때까지 계속 사용합니다.'
+          : '재검증 기한: ' + new Date(me.link.valid_until).toLocaleString('ko-KR'),
+      ),
       action('연결 해제', async () => {
         if (!confirm('계정 연결을 해제할까요?')) return;
         await api('/api/link', 'DELETE');
         location.reload();
       }),
     );
+    if (me.link.valid_until === 0 || me.link.valid_until > Date.now()) {
+      panel.append(
+        el(
+          'p',
+          {},
+          '이슈를 만들 때 이 Notion 계정이 자동으로 사용됩니다. 다른 계정으로 바꾸려면 먼저 연결을 해제하세요.',
+        ),
+      );
+      return;
+    }
   }
   if (!(me.linkingEnabled ?? me.guestVerificationEnabled)) {
     panel.append(
@@ -561,10 +577,10 @@ async function account() {
     el(
       'p',
       {},
-      '코드는 10분 동안 유효합니다. 지정 페이지에 새 댓글로 작성하고, 이 브라우저로 돌아오세요. 이름이나 이메일로 연결하지 않습니다.',
+      '최초 한 번 본인 확인 후 Discord 계정과 Notion 계정을 연결해 저장합니다. 인증 코드는 10분 동안 유효합니다. 지정 페이지에 새 댓글로 작성하고, 이 브라우저로 돌아오세요.',
     ),
     action(
-      '일회용 코드 발급',
+      '처음 한 번 계정 인증하기',
       async () => {
         const c = await api('/api/link/start', 'POST', {});
         const box = el(

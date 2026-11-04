@@ -57,12 +57,14 @@ export interface Project {
   schedule: { open: string; reminder: string; report: string };
   enabled: boolean;
   maxMembers: number;
+  /** 0 keeps verified account links until explicitly revoked. */
   linkLifetimeDays: number;
 }
 export interface Identity {
   userId: string;
   name: string;
   sessionHash: string;
+  sessionCookie?: string;
   csrf: string;
   admin: boolean;
 }

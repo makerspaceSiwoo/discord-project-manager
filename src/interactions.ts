@@ -63,7 +63,7 @@ export async function interactions(req: Request, env: Env, p: Project, ctx: Exec
       if (
         !(await one(
           env.DB,
-          'SELECT 1 FROM links WHERE project_id=? AND discord_id=? AND valid_until>?',
+          'SELECT 1 FROM links WHERE project_id=? AND discord_id=? AND (valid_until=0 OR valid_until>?)',
           p.id,
           draft.assignee,
           Date.now(),
