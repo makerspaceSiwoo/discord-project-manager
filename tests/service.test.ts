@@ -1,3 +1,12 @@
+import {
+  requestEmailLink,
+  approveEmailRequest,
+  cancelEmailRequest,
+  ownEmailRequest,
+  listEmailRequests,
+  findPersonByEmail,
+  emailCapabilities,
+} from '../src/modules/email-linking';
 import { Http } from '../src/adapters/http';
 import { Discord } from '../src/adapters/discord';
 import { Notion } from '../src/adapters/notion';
@@ -1228,5 +1237,82 @@ describe('월요일 투표 결과 링크', () => {
     expect((await jobStep('result-job')).status).toBe('done');
     expect(message.content).toContain('/?poll=' + encodeURIComponent(pollId) + '&tab=team');
     expect(message.attachments).toBeUndefined();
+  });
+});
+
+describe('이메일 계정 연결', () => {
+  const person = { id: nid, type: 'person', name: '본인', person: { email: 'me@example.com' } };
+  const adminWho = { ...who, admin: true };
+  function emailApi(changeEmail = false) {
+    return fake((url) => {
+      if (url.pathname.includes('/members/')) return member;
+      if (url.pathname === '/v1/users') return { results: [person], has_more: false };
+      if (url.pathname === '/v1/users/' + nid)
+        return changeEmail ? { ...person, person: { email: 'changed@example.com' } } : person;
+      if (url.pathname === '/v1/pages/probe') return page();
+      throw new Error('Unexpected endpoint');
+    });
+  }
+  it('이메일은 후보 요청만 만들고 관리자 확인·People 검증 후에 영구 연결한다', async () => {
+    emailApi();
+    const request = await requestEmailLink(e, p, who, ' ME@example.com ');
+    expect(request.email).toBe('me@example.com');
+    expect(await one(e.DB, 'SELECT 1 FROM links')).toBeNull();
+    await expect(approveEmailRequest(e, p, who, request.id)).rejects.toThrow('관리자');
+    expect((await listEmailRequests(e, p, adminWho))[0].discord_id).toBe(id);
+    await approveEmailRequest(e, p, adminWho, request.id);
+    expect((await one(e.DB, 'SELECT * FROM links')).valid_until).toBe(0);
+    expect((await one(e.DB, 'SELECT * FROM links')).notion_id).toBe(nid);
+    expect(await ownEmailRequest(e, p, who)).toBeNull();
+    await expect(approveEmailRequest(e, p, adminWho, request.id)).rejects.toThrow('요청');
+  });
+  it('본인 요청만 조회·취소할 수 있고 일반 멤버는 관리자 목록을 볼 수 없다', async () => {
+    emailApi();
+    const request = await requestEmailLink(e, p, who, 'me@example.com');
+    const other = { ...who, userId: '22222' };
+    expect(await ownEmailRequest(e, p, other)).toBeNull();
+    await cancelEmailRequest(e, p, other, request.id);
+    expect(await ownEmailRequest(e, p, who)).not.toBeNull();
+    await expect(listEmailRequests(e, p, who)).rejects.toThrow('관리자');
+    await cancelEmailRequest(e, p, who, request.id);
+    expect(await ownEmailRequest(e, p, who)).toBeNull();
+  });
+  it('이메일 변경, 요청 만료, 연결 해제 후에는 승인할 수 없다', async () => {
+    emailApi(true);
+    const request = await requestEmailLink(e, p, who, 'me@example.com');
+    await expect(approveEmailRequest(e, p, adminWho, request.id)).rejects.toThrow('변경');
+    expect(await one(e.DB, 'SELECT 1 FROM links')).toBeNull();
+    await run(e.DB, 'UPDATE link_requests SET expires=1');
+    await expect(approveEmailRequest(e, p, adminWho, request.id)).rejects.toThrow('만료');
+    await unlink(e, p, who);
+    expect(await one(e.DB, 'SELECT 1 FROM link_requests')).toBeNull();
+  });
+  it('이미 다른 Discord 계정에 연결된 Notion 계정은 덮어쓰지 않는다', async () => {
+    emailApi();
+    const request = await requestEmailLink(e, p, who, 'me@example.com');
+    await run(e.DB, 'INSERT INTO links VALUES(?,?,?,?,?)', p.id, '22222', nid, 0, 0);
+    await expect(approveEmailRequest(e, p, adminWho, request.id)).rejects.toThrow('다른 Discord');
+    expect((await all(e.DB, 'SELECT discord_id FROM links')).map((x) => x.discord_id)).toEqual([
+      '22222',
+    ]);
+    expect(await ownEmailRequest(e, p, who)).not.toBeNull();
+  });
+  it('게스트는 검증 행의 담당자 ID로 조회하며 전체 이메일 목록은 반환하지 않는다', async () => {
+    fake((url) => {
+      if (url.pathname === '/v1/users') return { results: [], has_more: false };
+      if (url.pathname === '/v1/pages/probe') return page();
+      if (url.pathname === '/v1/users/' + nid) return person;
+      throw new Error('Unexpected endpoint');
+    });
+    expect((await findPersonByEmail(new Notion(e), p, 'me@example.com')).id).toBe(nid);
+    const capability = await emailCapabilities(e, adminWho);
+    expect(capability.usersWithEmail).toBe(0);
+    expect(JSON.stringify(capability)).not.toContain('example.com');
+  });
+  it('요청을 반복하면 제한하고 계정 검색 결과만으로 연결을 만들지 않는다', async () => {
+    emailApi();
+    await requestEmailLink(e, p, who, 'me@example.com');
+    await expect(requestEmailLink(e, p, who, 'me@example.com')).rejects.toThrow('1분');
+    expect(await one(e.DB, 'SELECT 1 FROM links')).toBeNull();
   });
 });

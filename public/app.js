@@ -122,6 +122,7 @@ async function start() {
         location.href = '/';
       }),
     );
+    if (me.admin) document.querySelector('nav').append(el('a', { href: '/?view=admin' }, '관리자'));
     if (params.get('job')) return showJob(params.get('job'));
     if (params.get('view') === 'account') return account();
     if (params.get('view') === 'admin') return admin();
@@ -530,7 +531,7 @@ async function account() {
     heading(
       'ACCOUNT CONNECTION',
       '내 계정을 직접 연결해요',
-      'Discord 인증과 Notion의 실제 댓글 작성자 정보를 확인합니다.',
+      'Notion 로그인 이메일로 계정을 찾고 한 번 연결하면 계속 사용합니다.',
     ),
   );
   const panel = el('section', { class: 'card panel' });
@@ -573,65 +574,66 @@ async function account() {
     );
     return;
   }
+  const pending = await api('/api/link/email');
+  if (pending) {
+    panel.append(
+      el('h2', {}, me.admin ? '연결할 계정을 확인해 주세요' : '관리자 확인을 기다리고 있어요'),
+      el('p', {}, 'Discord: ' + me.name),
+      el('p', {}, 'Notion: ' + pending.name + ' · ' + pending.email),
+    );
+    if (me.admin)
+      panel.append(
+        action(
+          '이 계정으로 연결',
+          async () => {
+            await api('/api/admin/link-requests/approve', 'POST', { id: pending.id });
+            location.reload();
+          },
+          true,
+        ),
+      );
+    else panel.append(el('p', {}, '관리자가 Discord 계정과 Notion 계정을 확인하면 연결됩니다.'));
+    panel.append(
+      action('요청 취소 / 이메일 변경', async () => {
+        await api('/api/link/email/cancel', 'POST', { id: pending.id });
+        location.reload();
+      }),
+    );
+    return;
+  }
+  const email = el('input', {
+    type: 'email',
+    autocomplete: 'email',
+    required: '',
+    placeholder: 'Notion 로그인 이메일',
+    'aria-label': 'Notion 이메일',
+  });
   panel.append(
     el(
       'p',
       {},
-      '최초 한 번 본인 확인 후 Discord 계정과 Notion 계정을 연결해 저장합니다. 인증 코드는 10분 동안 유효합니다. 지정 페이지에 새 댓글로 작성하고, 이 브라우저로 돌아오세요.',
+      me.admin
+        ? '이메일을 입력하고 검색된 Notion 계정이 본인인지 확인하면 연결됩니다.'
+        : '이메일을 입력해 연결을 요청하세요. 관리자가 한 번 확인하면 계속 사용할 수 있습니다.',
     ),
+    el('label', {}, 'Notion 이메일', email),
     action(
-      '처음 한 번 계정 인증하기',
+      '이메일로 연결 요청',
       async () => {
-        const c = await api('/api/link/start', 'POST', {});
-        const box = el(
-          'div',
-          {},
-          el('code', {}, c.code),
-          el(
-            'a',
-            { href: c.pageUrl, target: '_blank', rel: 'noopener noreferrer' },
-            'Notion 인증 페이지 열기 ↗',
-          ),
-          el(
-            'p',
-            {},
-            '코드를 다른 사람에게 전달하지 마세요. 수정하지 않은 새 댓글로 입력해야 합니다.',
-          ),
-        );
-        box.append(
-          action('댓글 확인', async () => {
-            const user = await api('/api/link/inspect', 'POST', { id: c.id });
-            const confirmBox = el(
-              'div',
-              {},
-              el('h2', {}, '이 Notion 계정이 본인인가요?'),
-              el('p', {}, user.name),
-              el(
-                'p',
-                {},
-                user.email || '이메일을 제공받지 못했습니다. Notion 계정 ID를 확인해 주세요.',
-              ),
-              el('code', {}, user.notionId),
-              el('p', {}, user.warning),
-              action(
-                '본인 계정 확인 · 연결',
-                async () => {
-                  await api('/api/link/confirm', 'POST', { id: c.id, notionId: user.notionId });
-                  notify('People 지정까지 검증하여 연결했습니다.');
-                  location.reload();
-                },
-                true,
-              ),
-            );
-            box.replaceChildren(confirmBox);
-          }),
-        );
-        panel.append(box);
+        if (!email.reportValidity()) return;
+        await api('/api/link/email', 'POST', { email: email.value });
+        await account();
       },
       true,
     ),
+    el(
+      'p',
+      { class: 'micro' },
+      '댓글에 코드를 입력할 필요가 없습니다. 연결 요청은 7일 동안 유효합니다.',
+    ),
   );
 }
+
 async function reports() {
   const rows = await api('/api/reports');
   app.replaceChildren(
@@ -749,6 +751,44 @@ async function admin() {
       '실제 DB 속성, 채널 종류와 대상 명단을 확인하세요.',
     ),
   );
+  const requests = await api('/api/admin/link-requests');
+  const requestPanel = el('section', { class: 'card panel' }, el('h2', {}, '계정 연결 요청'));
+  if (!requests.length) requestPanel.append(el('p', {}, '대기 중인 요청이 없습니다.'));
+  for (const request of requests) {
+    requestPanel.append(
+      el(
+        'section',
+        { class: 'panel' },
+        el('h3', {}, request.discord_name + ' → ' + request.name),
+        el('p', {}, request.email),
+        el('p', { class: 'micro' }, 'Discord ID: ' + request.discord_id),
+        action(
+          '확인하고 연결',
+          async () => {
+            if (
+              !confirm(
+                request.discord_name +
+                  ' 님과 ' +
+                  request.name +
+                  ' (' +
+                  request.email +
+                  ') 계정이 같은 사람인지 확인했나요?',
+              )
+            )
+              return;
+            await api('/api/admin/link-requests/approve', 'POST', { id: request.id });
+            await admin();
+          },
+          true,
+        ),
+        action('요청 거절', async () => {
+          await api('/api/link/email/cancel', 'POST', { id: request.id });
+          await admin();
+        }),
+      ),
+    );
+  }
+  app.append(requestPanel);
   const out = el('pre', { class: 'json' }, JSON.stringify(data, null, 2));
   const input = el('input', {
     type: 'text',

@@ -112,6 +112,34 @@ export async function confirmLink(
     );
   if (comment.id !== c.comment_id || comment.created_by.id !== c.candidate)
     throw new AppError(409, '댓글이 변경되었습니다. 새 코드로 다시 인증하세요.');
+  await withVerifiedPerson(env, p, notionId, async () => {
+    const result = await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO links(project_id,discord_id,notion_id,verified_at,valid_until) SELECT project_id,user_id,candidate,?,? FROM challenges WHERE id=? AND consumed=0 AND expires>? ON CONFLICT(project_id,discord_id) DO UPDATE SET notion_id=excluded.notion_id,verified_at=excluded.verified_at,valid_until=excluded.valid_until',
+      ).bind(
+        Date.now(),
+        p.linkLifetimeDays === 0 ? 0 : Date.now() + p.linkLifetimeDays * 86400_000,
+        id,
+        Date.now(),
+      ),
+      env.DB.prepare('UPDATE challenges SET consumed=1 WHERE id=? AND consumed=0').bind(id),
+      env.DB.prepare('DELETE FROM link_requests WHERE project_id=? AND discord_id=?').bind(
+        p.id,
+        who.userId,
+      ),
+    ]);
+    if (!result[0].meta.changes) throw new AppError(409, '이미 사용되었거나 만료된 코드입니다.');
+  });
+  return { ok: true };
+}
+
+export async function withVerifiedPerson<T>(
+  env: Env,
+  p: Project,
+  notionId: string,
+  save: () => Promise<T>,
+): Promise<T> {
+  const n = new Notion(env);
   const lockId = `probe:${p.id}`,
     owner = random();
   const acquired = await run(
@@ -134,25 +162,25 @@ export async function confirmLink(
       page.in_trash
     )
       throw new AppError(409, '검증 페이지가 대상 이슈 DB에 속하지 않습니다.');
+    const expected = [
+      ...new Set<string>([
+        ...(page.properties[prop]?.people || []).map((u: any) => u.id),
+        notionId,
+      ]),
+    ];
+    if (expected.length > 25) throw new AppError(409, '검증용 행의 담당자 목록을 정리해 주세요.');
     await n.api(`/pages/${p.notion.probePageId}`, 'PATCH', {
-      properties: { [prop]: { people: [{ object: 'user', id: notionId }] } },
+      properties: { [prop]: { people: expected.map((id) => ({ object: 'user', id })) } },
     });
     const check = await n.api(`/pages/${p.notion.probePageId}`);
     const people = check.properties[prop]?.people;
-    if (people?.length !== 1 || people[0].id !== notionId)
+    if (
+      !people ||
+      people.length !== expected.length ||
+      expected.some((id) => !people.some((user: any) => user.id === id))
+    )
       throw new AppError(409, 'People 담당자 지정과 재조회를 검증하지 못했습니다.');
-    const result = await env.DB.batch([
-      env.DB.prepare(
-        'INSERT INTO links(project_id,discord_id,notion_id,verified_at,valid_until) SELECT project_id,user_id,candidate,?,? FROM challenges WHERE id=? AND consumed=0 AND expires>? ON CONFLICT(project_id,discord_id) DO UPDATE SET notion_id=excluded.notion_id,verified_at=excluded.verified_at,valid_until=excluded.valid_until',
-      ).bind(
-        Date.now(),
-        p.linkLifetimeDays === 0 ? 0 : Date.now() + p.linkLifetimeDays * 86400_000,
-        id,
-        Date.now(),
-      ),
-      env.DB.prepare('UPDATE challenges SET consumed=1 WHERE id=? AND consumed=0').bind(id),
-    ]);
-    if (!result[0].meta.changes) throw new AppError(409, '이미 사용되었거나 만료된 코드입니다.');
+    return await save();
   } catch (e) {
     if (String(e).includes('UNIQUE constraint'))
       throw new AppError(
@@ -163,11 +191,14 @@ export async function confirmLink(
   } finally {
     await run(env.DB, 'DELETE FROM locks WHERE id=? AND owner=?', lockId, owner);
   }
-  return { ok: true };
 }
 export async function unlink(env: Env, p: Project, who: Identity) {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM links WHERE project_id=? AND discord_id=?').bind(p.id, who.userId),
+    env.DB.prepare('DELETE FROM link_requests WHERE project_id=? AND discord_id=?').bind(
+      p.id,
+      who.userId,
+    ),
     env.DB.prepare('UPDATE challenges SET consumed=1 WHERE project_id=? AND user_id=?').bind(
       p.id,
       who.userId,

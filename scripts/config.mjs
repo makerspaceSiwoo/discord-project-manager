@@ -67,11 +67,8 @@ if (
     ))
 )
   fail('게스트 인증 검증 기록과 인증/전용 테스트 페이지 ID 필요');
-if (
-  p.linkingEnabled &&
-  ![p.notion.probePageId, p.notion.verificationPageId].every((id) => /^[a-f0-9-]{32,36}$/i.test(id))
-)
-  fail('인증/전용 검증 페이지 ID 필요');
+if (p.linkingEnabled && !/^[a-f0-9-]{32,36}$/i.test(p.notion.probePageId || ''))
+  fail('전용 검증 페이지 ID 필요');
 if (p.linkingEnabled !== undefined && typeof p.linkingEnabled !== 'boolean')
   fail('계정 연결 활성화 값은 boolean이어야 합니다.');
 for (const key of ['issues', 'automation'])

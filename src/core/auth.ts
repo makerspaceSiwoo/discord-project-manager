@@ -144,6 +144,10 @@ export async function authorize(req: Request, env: Env, p: Project): Promise<Ide
           s.user_id,
         ),
         env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(s.user_id),
+        env.DB.prepare('DELETE FROM link_requests WHERE project_id=? AND discord_id=?').bind(
+          p.id,
+          s.user_id,
+        ),
       ]);
     }
     throw e;

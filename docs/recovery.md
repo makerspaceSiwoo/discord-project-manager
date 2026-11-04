@@ -65,6 +65,8 @@ npx wrangler d1 export project-manager --remote --output work/backup.sql
 
 백업에는 사용자 ID·투표가 있으므로 비공개로 보관하고 Git에 커밋하지 않습니다. 복구는 새 D1에 검증한 export를 적용하고 binding을 전환하는 방식이 안전합니다. Free Time Travel 기간은 7일이므로 장기 백업을 대체하지 않습니다.
 
+이메일 연결의 만료된 대기 요청은 `DELETE FROM link_requests WHERE expires <= <현재 epoch 밀리초>`로 정리할 수 있습니다. 승인·취소된 요청은 즉시 삭제됩니다.
+
 만료 인증 데이터만 정리하는 예시입니다. 먼저 `SELECT COUNT(*)`로 건수를 확인하고 큰 데이터는 작은 batch로 나누세요. 주차 보고, 이슈 연결, 작업 효과는 중복 방지와 결과 조회에 쓰이므로 임의 삭제하지 않습니다.
 
 ```sql
